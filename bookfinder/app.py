@@ -4,10 +4,11 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V2', page_icon='📚', layout='wide')
-st.title('📚 Private FBA Book Finder — V2')
-st.caption('A2A price-gap discovery + conservative intrinsic value + recurring seasonal value from Keepa history.')
+st.set_page_config(page_title='Book Finder V3', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V3')
+st.caption('Generic USED market value + intrinsic floor + recurring seasonality + sales-rank drops + mini Keepa-style charts.')
 
 KEEPA_EPOCH = datetime(2011, 1, 1, tzinfo=timezone.utc)
 
@@ -22,27 +23,27 @@ if not key:
 with st.sidebar:
     st.header('Buying rules')
     max_cost = st.number_input('Maximum acquisition price ($)', 1., 500., 20.)
+    min_hist_value = st.number_input('Minimum historical Used value ($)', 1., 500., 20.)
     min_profit = st.number_input('Minimum estimated profit ($)', 0., 100., 5.)
     min_roi = st.number_input('Minimum ROI (%)', 0, 1000, 50)
     extra_cost = st.number_input('Inbound shipping + prep ($)', 0., 30., 2.)
     fee_est = st.number_input('Estimated Amazon fees ($) — placeholder', 0., 50., 8.)
-    max_rank = st.number_input('Maximum current sales rank', 1000, 10000000, 1000000, step=100000)
-    min_fba = st.number_input('Minimum current Used FBA price ($)', 1., 500., 20.)
+    max_rank = st.number_input('Maximum current sales rank', 1000, 10000000, 2000000, step=100000)
     st.divider()
     st.header('Value model')
-    floor_days = st.selectbox('Intrinsic-value lookback', [30, 90, 180, 365], index=1)
+    floor_days = st.selectbox('Intrinsic-value lookback', [90, 180, 365, 730], index=2)
     low_band = st.slider('Low-price band used for intrinsic value', 10, 50, 25, 5)
-    st.caption('Example: 25% = average of the lower quarter of daily prices after trimming extreme lows.')
+    chart_days = st.selectbox('Mini chart period', [90, 365, 730], index=1, format_func=lambda x: '90 days' if x==90 else ('1 year' if x==365 else '2 years'))
+    st.caption('Intrinsic value uses generic USED history—not an FBA premium. The mini chart shows Used price plus sales rank/rank drops.')
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def discover(api_key, max_rank, max_cost, min_fba):
-    # Discovery is intentionally sorted by cheap Used acquisition price, NOT sales rank.
-    # current_USED is a market reference; exact buyability/condition must still be verified.
+def discover(api_key, max_rank, max_cost, min_hist_value):
+    # Find books cheap today relative to their 90-day generic USED average.
     selection = {
         'rootCategory': [283155], 'productType': 0,
         'current_SALES_lte': int(max_rank),
         'current_USED_lte': int(max_cost * 100),
-        'current_USED_FBA_gte': int(min_fba * 100),
+        'avg90_USED_gte': int(min_hist_value * 100),
         'perPage': 50, 'page': 0,
         'sort': [['current_USED', 'asc']]
     }
@@ -56,7 +57,6 @@ def discover(api_key, max_rank, max_cost, min_fba):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def details(api_key, asins):
-    # Keep full price history for seasonality; stats gives convenient current values.
     r = requests.get('https://api.keepa.com/product', params={
         'key': api_key, 'domain': 1, 'asin': ','.join(asins), 'stats': 365, 'history': 1
     }, timeout=90)
@@ -70,147 +70,142 @@ def cents(v):
 def at(arr, idx):
     return cents(arr[idx]) if isinstance(arr, list) and len(arr) > idx else None
 
-def keepa_series(csv_arr):
-    """Convert Keepa [minute, cents, minute, cents...] change points to daily forward-filled prices."""
+def keepa_series(csv_arr, divide=100.0):
     if not isinstance(csv_arr, list) or len(csv_arr) < 2: return pd.Series(dtype=float)
     pts = []
-    for i in range(0, len(csv_arr) - 1, 2):
-        t, v = csv_arr[i], csv_arr[i + 1]
-        if not isinstance(t, (int, float)) or not isinstance(v, (int, float)) or v < 0: continue
+    for i in range(0, len(csv_arr)-1, 2):
+        t, v = csv_arr[i], csv_arr[i+1]
+        if not isinstance(t,(int,float)) or not isinstance(v,(int,float)) or v < 0: continue
         dt = KEEPA_EPOCH + timedelta(minutes=int(t))
-        pts.append((pd.Timestamp(dt).tz_convert(None).normalize(), v / 100.0))
+        pts.append((pd.Timestamp(dt).tz_convert(None).normalize(), v/divide))
     if not pts: return pd.Series(dtype=float)
-    s = pd.Series({d: v for d, v in pts}).sort_index()
+    s = pd.Series({d:v for d,v in pts}).sort_index()
     end = pd.Timestamp.utcnow().tz_localize(None).normalize()
-    start = s.index.min()
-    return s.reindex(pd.date_range(start, end, freq='D')).ffill().dropna()
+    return s.reindex(pd.date_range(s.index.min(), end, freq='D')).ffill().dropna()
 
-def intrinsic_floor(s, days=90, band_pct=25):
+def intrinsic_floor(s, days=365, band_pct=25):
     if s.empty: return None
-    x = s[s.index >= s.index.max() - pd.Timedelta(days=days)].dropna()
-    if len(x) < 7: return None
-    # Remove extreme one-off lows, then average the lower band of observed daily prices.
+    x = s[s.index >= s.index.max()-pd.Timedelta(days=days)].dropna()
+    if len(x)<7: return None
     trim = x[x >= x.quantile(.05)]
-    cutoff = trim.quantile(band_pct / 100)
+    cutoff = trim.quantile(band_pct/100)
     low = trim[trim <= cutoff]
-    return round(float(low.mean()), 2) if len(low) else None
+    return round(float(low.mean()),2) if len(low) else None
 
 def seasonal_model(s):
-    """Find recurring calendar-month premium using completed prior years; require >=2 years."""
-    if s.empty or len(s) < 365 * 2: return None
-    df = s.rename('price').to_frame(); df['year'] = df.index.year; df['month'] = df.index.month
-    current_year = pd.Timestamp.utcnow().year
-    hist = df[df['year'] < current_year]
-    if hist.empty: return None
-    monthly = hist.groupby(['year', 'month']).price.median().reset_index()
-    years_per_month = monthly.groupby('month').year.nunique()
-    valid_months = years_per_month[years_per_month >= 2].index
-    if len(valid_months) == 0: return None
-    month_stats = monthly[monthly.month.isin(valid_months)].groupby('month').price.agg(['median','count'])
-    baseline = float(hist.price.median())
-    if baseline <= 0: return None
-    month_stats['premium'] = month_stats['median'] / baseline
-    best_month = int(month_stats['premium'].idxmax())
-    premium = float(month_stats.loc[best_month, 'premium'])
-    if premium < 1.20: return None
-    # Conservative seasonal value: lower of median seasonal month and 25th percentile across yearly medians.
-    vals = monthly[monthly.month == best_month].price
-    seasonal_value = float(min(vals.median(), vals.quantile(.25)))
-    return {'month': best_month, 'value': round(seasonal_value,2), 'premium': round((premium-1)*100,1), 'years': int(len(vals))}
+    if s.empty or len(s)<365*2: return None
+    df=s.rename('price').to_frame(); df['year']=df.index.year; df['month']=df.index.month
+    hist=df[df.year < pd.Timestamp.utcnow().year]
+    monthly=hist.groupby(['year','month']).price.median().reset_index()
+    valid=monthly.groupby('month').year.nunique(); valid=valid[valid>=2].index
+    if not len(valid): return None
+    stats=monthly[monthly.month.isin(valid)].groupby('month').price.agg(['median','count'])
+    baseline=float(hist.price.median())
+    if baseline<=0:return None
+    stats['premium']=stats['median']/baseline
+    m=int(stats.premium.idxmax()); premium=float(stats.loc[m,'premium'])
+    if premium<1.20:return None
+    vals=monthly[monthly.month==m].price
+    value=float(min(vals.median(), vals.quantile(.25)))
+    confidence='High' if len(vals)>=3 else 'Medium'
+    return {'month':m,'value':round(value,2),'premium':round((premium-1)*100,1),'years':int(len(vals)),'confidence':confidence}
 
-def month_name(m):
-    return datetime(2000, m, 1).strftime('%b') if m else ''
+def rank_drop_count(rank_s, days=90):
+    if rank_s.empty:return 0
+    x=rank_s[rank_s.index>=rank_s.index.max()-pd.Timedelta(days=days)].dropna()
+    # Meaningful downward rank moves (lower rank number = improvement). This is a proxy, not exact unit sales.
+    prev=x.shift(1)
+    return int(((prev-x) > np.maximum(prev*0.08, 5000)).sum())
 
-st.subheader('1 · Find A2A price-gap candidates')
-st.write('V2 searches for **cheap Used market prices with a higher Used FBA market**, then evaluates whether the higher value is supported by history.')
-st.caption('Keepa prices are market references, not guaranteed live purchasable offers. Exact seller, condition, edition, eligibility and checkout price must be verified before buying.')
+def month_name(m): return datetime(2000,m,1).strftime('%b') if m else ''
 
-if st.button('🔎 Discover up to 50 A2A candidates', disabled=not bool(key), type='primary'):
+def mini_chart(price_s, rank_s, days, title):
+    end=max(price_s.index.max() if not price_s.empty else pd.Timestamp.min, rank_s.index.max() if not rank_s.empty else pd.Timestamp.min)
+    start=end-pd.Timedelta(days=days)
+    p=price_s[price_s.index>=start]; r=rank_s[rank_s.index>=start]
+    fig, ax1=plt.subplots(figsize=(8,2.35))
+    if not p.empty:
+        ax1.plot(p.index,p.values,color='black',linewidth=1.4,label='Used price')
+    ax1.set_ylabel('Used $'); ax1.grid(alpha=.18); ax1.tick_params(axis='x',labelsize=8); ax1.tick_params(axis='y',labelsize=8)
+    ax2=ax1.twinx()
+    if not r.empty:
+        ax2.plot(r.index,r.values,color='green',linewidth=.9,alpha=.8,label='Sales rank')
+        ax2.invert_yaxis()
+    ax2.set_ylabel('Sales rank'); ax2.tick_params(axis='y',labelsize=8)
+    ax1.set_title(title,fontsize=9,loc='left')
+    fig.tight_layout()
+    return fig
+
+st.subheader('1 · Discover undervalued USED books')
+st.write('V3 looks for books whose **current generic Used price is low relative to their historical Used market value**. It does not assume an FBA price premium.')
+st.caption('Keepa prices are market references. Verify the exact offer, condition, edition, seller, eligibility and checkout price before buying.')
+
+if st.button('🔎 Discover up to 50 Used opportunities', disabled=not bool(key), type='primary'):
     try:
-        with st.spinner('Searching Keepa for price gaps…'):
-            response = discover(key, max_rank, max_cost, min_fba)
-        st.session_state['asins'] = response.get('asinList', [])
-        st.success(f"Found {len(st.session_state['asins'])} candidates. Keepa tokens left: {response.get('tokensLeft','unknown')}")
-    except Exception as e:
-        st.error(f'Keepa discovery failed: {e}')
+        with st.spinner('Searching Keepa for Used-market price gaps…'):
+            response=discover(key,max_rank,max_cost,min_hist_value)
+        st.session_state['asins_v3']=response.get('asinList',[])
+        st.success(f"Found {len(st.session_state['asins_v3'])} candidates. Keepa tokens left: {response.get('tokensLeft','unknown')}")
+    except Exception as e: st.error(f'Keepa discovery failed: {e}')
 
-asins = st.session_state.get('asins', [])
+asins=st.session_state.get('asins_v3',[])
 if asins:
     st.write(f'Candidate pool: **{len(asins)} books**')
-    n = st.slider('Books to analyze now', 1, min(20, len(asins)), min(5, len(asins)))
-    st.caption('Start small on a 1-token/minute Keepa plan. Cached books will not be re-requested for 24 hours.')
+    n=st.slider('Books to analyze now',1,min(20,len(asins)),min(5,len(asins)))
+    st.caption('Start small on a 1-token/minute plan. Detailed history is cached for 24 hours.')
     if st.button(f'Analyze first {n} books'):
         try:
-            with st.spinner('Building intrinsic and seasonal values from Keepa history…'):
-                response = details(key, asins[:n])
-            rows = []
-            for p in response.get('products', []):
-                current = p.get('stats', {}).get('current', [])
-                csv = p.get('csv', [])
-                used = at(current, 2)
-                used_fba = at(current, 10)
-                rank = current[3] if len(current) > 3 and isinstance(current[3], (int,float)) and current[3] >= 0 else None
-                # Prefer Used FBA history; fall back to Used history when FBA history is unavailable.
-                fba_hist = keepa_series(csv[10]) if isinstance(csv, list) and len(csv) > 10 else pd.Series(dtype=float)
-                used_hist = keepa_series(csv[2]) if isinstance(csv, list) and len(csv) > 2 else pd.Series(dtype=float)
-                hist = fba_hist if len(fba_hist) >= 30 else used_hist
-                floor = intrinsic_floor(hist, floor_days, low_band)
-                season = seasonal_model(hist)
-                rows.append({
-                    'ASIN': p.get('asin'), 'Title': p.get('title',''), 'Rank': rank,
-                    'Market buy ref ($)': used, 'Current Used FBA ($)': used_fba,
-                    'Intrinsic floor ($)': floor,
-                    'Seasonal value ($)': season['value'] if season else None,
-                    'Best month': month_name(season['month']) if season else '',
-                    'Seasonal premium (%)': season['premium'] if season else None,
-                    'Seasonal years': season['years'] if season else 0,
-                    'Amazon link': f"https://www.amazon.com/dp/{p.get('asin')}"
-                })
-            st.session_state['books_v2'] = rows
+            with st.spinner('Analyzing Used price history, seasonality and rank drops…'):
+                response=details(key,asins[:n])
+            rows=[]; histories={}
+            for p in response.get('products',[]):
+                current=p.get('stats',{}).get('current',[]); csv=p.get('csv',[]); asin=p.get('asin')
+                used=at(current,2); rank=current[3] if len(current)>3 and isinstance(current[3],(int,float)) and current[3]>=0 else None
+                used_hist=keepa_series(csv[2],100.0) if isinstance(csv,list) and len(csv)>2 else pd.Series(dtype=float)
+                rank_hist=keepa_series(csv[3],1.0) if isinstance(csv,list) and len(csv)>3 else pd.Series(dtype=float)
+                floor=intrinsic_floor(used_hist,floor_days,low_band); season=seasonal_model(used_hist)
+                drops90=rank_drop_count(rank_hist,90); median365=round(float(used_hist[used_hist.index>=used_hist.index.max()-pd.Timedelta(days=365)].median()),2) if not used_hist.empty else None
+                histories[asin]=(used_hist,rank_hist)
+                rows.append({'ASIN':asin,'Title':p.get('title',''),'Rank':rank,'Current Used ($)':used,'Intrinsic floor ($)':floor,'365d Used median ($)':median365,'Rank drops 90d':drops90,'Seasonal value ($)':season['value'] if season else None,'Peak month':month_name(season['month']) if season else '','Seasonal premium (%)':season['premium'] if season else None,'Seasonal years':season['years'] if season else 0,'Seasonal confidence':season['confidence'] if season else 'None','Amazon link':f'https://www.amazon.com/dp/{asin}','Keepa link':f'https://keepa.com/#!product/1-{asin}'})
+            st.session_state['books_v3']=rows; st.session_state['histories_v3']=histories
             st.success(f"Analyzed {len(rows)} books. Tokens remaining: {response.get('tokensLeft','unknown')}")
-        except Exception as e:
-            st.error(f'Keepa details failed: {e}')
+        except Exception as e: st.error(f'Keepa details failed: {e}')
 
-books = st.session_state.get('books_v2', [])
+books=st.session_state.get('books_v3',[])
 if books:
-    st.subheader('2 · Opportunity scoring')
-    df = pd.DataFrame(books)
-    df.insert(3, 'Verified buy cost ($)', df['Market buy ref ($)'].fillna(max_cost))
-    edited = st.data_editor(df, hide_index=True, use_container_width=True, num_rows='fixed',
-        disabled=[c for c in df.columns if c != 'Verified buy cost ($)'])
+    st.subheader('2 · Used-book opportunity scoring')
+    df=pd.DataFrame(books); df.insert(3,'Verified buy cost ($)',df['Current Used ($)'].fillna(max_cost))
+    edited=st.data_editor(df,hide_index=True,use_container_width=True,num_rows='fixed',disabled=[c for c in df.columns if c!='Verified buy cost ($)'])
+    outcomes=[]
+    for _,r in edited.iterrows():
+        buy=float(r['Verified buy cost ($)']) if pd.notna(r['Verified buy cost ($)']) else None
+        floor=float(r['Intrinsic floor ($)']) if pd.notna(r['Intrinsic floor ($)']) else None
+        seasonal=float(r['Seasonal value ($)']) if pd.notna(r['Seasonal value ($)']) else None
+        ep=round(floor-buy-fee_est-extra_cost,2) if buy is not None and floor is not None else None
+        er=round(100*ep/(buy+extra_cost),1) if ep is not None and buy+extra_cost>0 else None
+        sp=round(seasonal-buy-fee_est-extra_cost,2) if buy is not None and seasonal is not None else None
+        sr=round(100*sp/(buy+extra_cost),1) if sp is not None and buy+extra_cost>0 else None
+        eok=ep is not None and ep>=min_profit and er>=min_roi and buy<=max_cost
+        sok=sp is not None and sp>=min_profit and sr>=min_roi and buy<=max_cost and (r['Seasonal years'] or 0)>=2
+        action='🟢 BUY NOW' if eok else ('🟠 BUY & HOLD' if sok else ('⚪ REVIEW' if ep is None and sp is None else '🔴 PASS'))
+        maxbuy=round(floor-fee_est-extra_cost-min_profit,2) if floor is not None else None
+        outcomes.append({'Action':action,'ASIN':r['ASIN'],'Title':r['Title'],'Rank':r['Rank'],'Rank drops 90d':r['Rank drops 90d'],'Buy ($)':buy,'Intrinsic floor ($)':floor,'365d median ($)':r['365d Used median ($)'],'Max buy @ min profit ($)':maxbuy,'Profit @ floor ($)':ep,'ROI @ floor (%)':er,'Seasonal value ($)':seasonal,'Peak month':r['Peak month'],'Seasonal confidence':r['Seasonal confidence'],'Seasonal profit ($)':sp,'Seasonal ROI (%)':sr,'Amazon link':r['Amazon link'],'Keepa link':r['Keepa link']})
+    result=pd.DataFrame(outcomes); order={'🟢 BUY NOW':0,'🟠 BUY & HOLD':1,'⚪ REVIEW':2,'🔴 PASS':3}; result['_o']=result.Action.map(order).fillna(9); result=result.sort_values(['_o','Profit @ floor ($)','Seasonal profit ($)'],ascending=[True,False,False]).drop(columns='_o')
+    st.dataframe(result,use_container_width=True,hide_index=True)
 
-    outcomes = []
-    now_month = pd.Timestamp.utcnow().month
-    for _, r in edited.iterrows():
-        buy = float(r['Verified buy cost ($)']) if pd.notna(r['Verified buy cost ($)']) else None
-        floor = float(r['Intrinsic floor ($)']) if pd.notna(r['Intrinsic floor ($)']) else None
-        seasonal = float(r['Seasonal value ($)']) if pd.notna(r['Seasonal value ($)']) else None
-        best_month = r['Best month'] if pd.notna(r['Best month']) else ''
-        # Evergreen case uses conservative floor. Seasonal case is separate and never silently replaces it.
-        evergreen_profit = round(floor - buy - fee_est - extra_cost, 2) if buy is not None and floor is not None else None
-        evergreen_roi = round(100 * evergreen_profit / (buy + extra_cost), 1) if evergreen_profit is not None and buy + extra_cost > 0 else None
-        seasonal_profit = round(seasonal - buy - fee_est - extra_cost, 2) if buy is not None and seasonal is not None else None
-        seasonal_roi = round(100 * seasonal_profit / (buy + extra_cost), 1) if seasonal_profit is not None and buy + extra_cost > 0 else None
-        evergreen_ok = evergreen_profit is not None and evergreen_profit >= min_profit and evergreen_roi >= min_roi and buy <= max_cost
-        seasonal_ok = seasonal_profit is not None and seasonal_profit >= min_profit and seasonal_roi >= min_roi and buy <= max_cost and (r['Seasonal years'] or 0) >= 2
-        if evergreen_ok: action = '🟢 BUY NOW'
-        elif seasonal_ok: action = '🟠 BUY & HOLD'
-        elif evergreen_profit is None and seasonal_profit is None: action = '⚪ REVIEW'
-        else: action = '🔴 PASS'
-        outcomes.append({
-            'Action': action, 'ASIN': r['ASIN'], 'Title': r['Title'], 'Rank': r['Rank'],
-            'Buy ($)': buy, 'Current FBA ($)': r['Current Used FBA ($)'],
-            'Intrinsic floor ($)': floor, 'Profit @ floor ($)': evergreen_profit, 'ROI @ floor (%)': evergreen_roi,
-            'Seasonal value ($)': seasonal, 'Peak month': best_month,
-            'Seasonal profit ($)': seasonal_profit, 'Seasonal ROI (%)': seasonal_roi,
-            'Recurring years': r['Seasonal years'], 'Amazon link': r['Amazon link']
-        })
-    result = pd.DataFrame(outcomes)
-    order = {'🟢 BUY NOW':0, '🟠 BUY & HOLD':1, '⚪ REVIEW':2, '🔴 PASS':3}
-    result['_order'] = result.Action.map(order).fillna(9)
-    result = result.sort_values(['_order','Profit @ floor ($)','Seasonal profit ($)'], ascending=[True,False,False]).drop(columns='_order')
-    st.dataframe(result, use_container_width=True, hide_index=True)
-    st.download_button('Download V2 results CSV', result.to_csv(index=False).encode(), 'bookfinder_v2_results.csv', 'text/csv')
-    st.info('🟢 BUY NOW = profitable at conservative historical floor.  🟠 BUY & HOLD = not attractive at the floor, but has a recurring seasonal premium in at least 2 prior years. Always verify the actual offer and exact edition before purchase.')
+    st.subheader('3 · Mini Keepa-style visual checks')
+    st.caption('⚫ black = generic Used price. 🟢 green = sales rank (lower/better rank plots upward). Rank drops are a demand proxy, not exact unit sales.')
+    histories=st.session_state.get('histories_v3',{})
+    for _,r in result.iterrows():
+        asin=r['ASIN']; p,rk=histories.get(asin,(pd.Series(dtype=float),pd.Series(dtype=float)))
+        with st.expander(f"{r['Action']} · {r['Title'][:90]} · {asin}", expanded=r['Action'] in ['🟢 BUY NOW','🟠 BUY & HOLD']):
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric('Buy',f"${r['Buy ($)']:.2f}" if pd.notna(r['Buy ($)']) else '—'); c2.metric('Intrinsic Used',f"${r['Intrinsic floor ($)']:.2f}" if pd.notna(r['Intrinsic floor ($)']) else '—'); c3.metric('Rank drops 90d',int(r['Rank drops 90d']) if pd.notna(r['Rank drops 90d']) else 0); c4.metric('Peak month',r['Peak month'] or '—')
+            fig=mini_chart(p,rk,chart_days,f"{chart_days}-day Used price + sales rank")
+            st.pyplot(fig,use_container_width=True); plt.close(fig)
+            st.markdown(f"[Amazon]({r['Amazon link']}) · [Full Keepa chart]({r['Keepa link']})")
+
+    st.download_button('Download V3 results CSV',result.to_csv(index=False).encode(),'bookfinder_v3_results.csv','text/csv')
+    st.info('BUY NOW = works at the conservative generic Used floor. BUY & HOLD = recurring seasonal Used-market value in at least 2 prior years. Always verify exact condition and edition before purchase.')
 else:
-    st.info('Run discovery, then analyze a small batch. V2 deliberately does not rank candidates simply by best sales rank.')
+    st.info('Run discovery, then analyze a small batch. V3 uses generic Used history throughout the value model.')
