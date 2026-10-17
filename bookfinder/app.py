@@ -6,14 +6,16 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V4', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V4')
-st.caption('Fast sourcing dashboard: shipped buy cost + conservative Used value + demand + supply + mini Keepa graph + review history.')
+st.set_page_config(page_title='Book Finder V5', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V5')
+st.caption('A2A sourcing: Value Mine + recent Used price drops + seasonal value + shipped-cost reference + demand/supply + review history.')
 
 KEEPA_EPOCH = datetime(2011, 1, 1, tzinfo=timezone.utc)
 
 # Keepa Product.csv / stats.current indexes used here.
 USED, SALES, COUNT_USED = 2, 3, 12
+# Keepa price-type indexes: shipping-inclusive Used conditions + Used Buy Box.
+USED_LN_SHIP, USED_VG_SHIP, USED_GOOD_SHIP, USED_ACC_SHIP, USED_BB_SHIP = 19, 20, 21, 22, 32
 
 def secret(name):
     try: return st.secrets.get(name, os.getenv(name, ''))
@@ -42,7 +44,7 @@ def load_statuses():
         try: return {x['asin']:x for x in load_statuses_remote(supa_url,supa_key)}
         except Exception as e:
             st.sidebar.warning(f'History database unavailable: {e}')
-    return st.session_state.setdefault('local_statuses_v4', {})
+    return st.session_state.setdefault('local_statuses_v5', {})
 
 def save_status(asin, status, title='', reason=''):
     row={'asin':asin,'status':status,'title':title[:500],'reason':reason[:500],'updated_at':datetime.now(timezone.utc).isoformat()}
@@ -50,7 +52,7 @@ def save_status(asin, status, title='', reason=''):
         r=requests.post(f'{supa_url}/rest/v1/book_status?on_conflict=asin', headers={**db_headers(),'Prefer':'resolution=merge-duplicates,return=minimal'}, data=json.dumps(row), timeout=20)
         r.raise_for_status(); load_statuses_remote.clear()
     else:
-        st.session_state.setdefault('local_statuses_v4', {})[asin]=row
+        st.session_state.setdefault('local_statuses_v5', {})[asin]=row
 
 statuses=load_statuses()
 
@@ -63,6 +65,11 @@ with st.sidebar:
     extra_cost = st.number_input('Inbound shipping + prep ($)', 0., 30., 2.)
     fee_est = st.number_input('Estimated Amazon fees ($) — placeholder', 0., 50., 8.)
     max_rank = st.number_input('Maximum current sales rank', 1000, 10000000, 2000000, step=100000)
+    st.divider(); st.header('Mining mode')
+    mining_mode = st.radio('Discovery engine', ['🔎 Value Mine','⚡ Recent Used Drops','🎓 Seasonal Mine'], index=0)
+    deal_window = st.selectbox('Recent-drop window', [('24 hours',0),('7 days',1),('31 days',2),('90 days',3)], index=1, format_func=lambda x:x[0])
+    min_drop_pct = st.slider('Minimum recent price drop (%)', 10, 80, 30, 5)
+    st.caption('Recent Drops uses Keepa Deals first, then spends detail-history calls only on the candidates you choose to analyze.')
     st.divider(); st.header('Value model')
     floor_days = st.selectbox('Intrinsic-value lookback', [90,180,365,730], index=2)
     low_band = st.slider('Low-price band used for intrinsic value',10,50,25,5)
@@ -76,6 +83,23 @@ with st.sidebar:
 def discover(api_key,max_rank,max_cost,min_hist_value):
     selection={'rootCategory':[283155],'productType':0,'current_SALES_lte':int(max_rank),'current_USED_lte':int(max_cost*100),'avg90_USED_gte':int(min_hist_value*100),'perPage':50,'page':0,'sort':[['current_USED','asc']]}
     r=requests.get('https://api.keepa.com/query',params={'key':api_key,'domain':1,'selection':json.dumps(selection,separators=(',',':'))},timeout=45)
+    r.raise_for_status(); data=r.json()
+    if data.get('error'): raise ValueError(str(data['error']))
+    return data
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def discover_deals(api_key, max_rank, max_cost, drop_pct, date_range):
+    # Keepa Deals: USED marketplace price drops. 5 tokens/request, up to 150 deals.
+    selection={
+        'page':0,'domainId':1,'priceTypes':[2],'dateRange':int(date_range),
+        'isRangeEnabled':True,'isFilterEnabled':True,
+        'includeCategories':[283155],
+        'salesRankRange':[0,int(max_rank)],
+        'currentRange':[0,int(max_cost*100)],
+        'deltaPercentRange':[int(drop_pct),100],
+        'filterErotic':True,'singleVariation':True,'sortType':4
+    }
+    r=requests.post('https://api.keepa.com/deal',params={'key':api_key},json=selection,timeout=60)
     r.raise_for_status(); data=r.json()
     if data.get('error'): raise ValueError(str(data['error']))
     return data
@@ -135,12 +159,56 @@ def supply_meter(offers,drops90):
     if ratio<=2.0 and offers<=20:return '🟡 BALANCED'
     return '🔴 HIGH'
 
+def shipped_used_reference(current):
+    vals=[]
+    for idx in (USED_LN_SHIP,USED_VG_SHIP,USED_GOOD_SHIP,USED_ACC_SHIP,USED_BB_SHIP):
+        v=at_price(current,idx)
+        if v is not None and v>0: vals.append(v)
+    return min(vals) if vals else None
+
+def supply_trend(offer_s):
+    if offer_s.empty:return ('UNKNOWN',None,None)
+    end=offer_s.index.max()
+    now=float(offer_s.iloc[-1])
+    old=offer_s[offer_s.index<=end-pd.Timedelta(days=90)]
+    if old.empty:return ('NEW DATA',None,None)
+    past=float(old.iloc[-1])
+    if past<=0:return ('UNKNOWN',past,now)
+    pct=(now-past)/past*100
+    if pct<=-30:return ('⬇️ SQUEEZE',past,now)
+    if pct>=30:return ('⬆️ RISING',past,now)
+    return ('➡️ STABLE',past,now)
+
+def recovery_cycles(s,days=730):
+    if s.empty:return 0
+    x=s[s.index>=s.index.max()-pd.Timedelta(days=days)].dropna()
+    if len(x)<60:return 0
+    med=float(x.median())
+    if med<=0:return 0
+    low=x<med*.60
+    recovered=x>med*.85
+    cycles=0; in_low=False
+    for lo,rec in zip(low.values,recovered.values):
+        if lo: in_low=True
+        elif in_low and rec:
+            cycles+=1; in_low=False
+    return cycles
+
+def price_crash_signal(current_used, med365, floor):
+    if current_used is None or med365 is None or med365<=0:return ''
+    pct=(1-current_used/med365)*100
+    if pct>=50 and floor is not None and floor>=current_used*1.5:return f'🔥 CRASH {pct:.0f}% below median'
+    if pct>=30:return f'📉 {pct:.0f}% below median'
+    return ''
+
 def classify_book(title):
     t=(title or '').lower()
     if any(x in t for x in ['textbook','edition','calculus','algebra','anatomy','chemistry','biology','organizational behavior','economics','accounting']):return 'College/Textbook'
     if any(x in t for x in ['sat ','act ','gre ','gmat','mcat','nclex','test prep','study guide']):return 'Test Prep'
-    if any(x in t for x in ['christmas','halloween','thanksgiving','easter','valentine']):return 'Holiday/Seasonal'
-    if any(x in t for x in ['manual','handbook','certification','nursing','medical','engineering','law ']):return 'Professional/Technical'
+    if any(x in t for x in ['christmas','halloween','thanksgiving','easter','valentine','advent','hanukkah']):return 'Holiday/Seasonal'
+    if any(x in t for x in ['ap ','common core','grade ','teacher edition','student edition','workbook']):return 'K-12/Education'
+    if any(x in t for x in ['manual','handbook','certification','nursing','medical','engineering','law ','coding','programming']):return 'Professional/Technical'
+    if any(x in t for x in ['travel guide','national park','road atlas','cruise']):return 'Travel/Seasonal'
     return 'General/All-Year'
 
 def month_name(m):return datetime(2000,m,1).strftime('%b') if m else ''
@@ -167,19 +235,39 @@ def decision_reason(action,buy,floor,maxbuy,drops,offers):
     return 'Needs manual review.'
 
 st.subheader('1 · Mine new Used-book opportunities')
-st.write('Discovery uses generic **Used** pricing. Books you marked Reviewed/Buy/Watch/Pass are removed from the **New only** candidate list before detailed analysis, saving repeat detail calls.')
-st.caption('Keepa generic marketplace prices do not necessarily include shipping. The editable Buy Cost below is the delivered/shipped cost you verify before buying. Keepa documents marketplace price and offer data separately. citeturn0search2turn1search5')
+st.write('Choose **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. Previously marked ASINs are removed before detailed analysis.')
+st.caption('V5 keeps generic USED history as the value model. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V5 uses it as the starting shipped-cost estimate; always verify checkout.')
 
-if st.button('🔎 Discover up to 50 Used opportunities',disabled=not bool(key),type='primary'):
+button_label = '⚡ Find recent Used price drops' if mining_mode.startswith('⚡') else ('🎓 Find seasonal candidates' if mining_mode.startswith('🎓') else '🔎 Discover value opportunities')
+if st.button(button_label,disabled=not bool(key),type='primary'):
     try:
-        with st.spinner('Searching Keepa…'):response=discover(key,max_rank,max_cost,min_intrinsic)
-        raw=response.get('asinList',[]); known=set(statuses)
+        if mining_mode.startswith('⚡'):
+            with st.spinner('Searching Keepa Deals for recent Used drops…'):
+                response=discover_deals(key,max_rank,max_cost,min_drop_pct,deal_window[1])
+            deals=response.get('deals',{}).get('dr',[])
+            raw=[d.get('asin') for d in deals if d.get('asin')]
+            deal_meta={}
+            for d in deals:
+                asin=d.get('asin')
+                dp=d.get('deltaPercent',[])
+                pct=None
+                try:
+                    pct=dp[deal_window[1]][USED]
+                except Exception: pass
+                deal_meta[asin]={'drop_pct':pct,'source':'Recent Used Drop'}
+            st.session_state['deal_meta_v5']=deal_meta
+        else:
+            with st.spinner('Searching Keepa…'):
+                response=discover(key,max_rank,max_cost,min_intrinsic)
+            raw=response.get('asinList',[])
+            st.session_state['deal_meta_v5']={a:{'source':'Seasonal Mine' if mining_mode.startswith('🎓') else 'Value Mine'} for a in raw}
+        known=set(statuses)
         new=[a for a in raw if a not in known]
-        st.session_state['asins_v4_raw']=raw; st.session_state['asins_v4']=new
+        st.session_state['asins_v5_raw']=raw; st.session_state['asins_v5']=new
         st.success(f'Keepa returned {len(raw)} candidates; {len(new)} are new to you. Tokens left: {response.get("tokensLeft","unknown")}')
     except Exception as e:st.error(f'Keepa discovery failed: {e}')
 
-asins=st.session_state.get('asins_v4',[])
+asins=st.session_state.get('asins_v5',[])
 if asins:
     n=st.slider('New books to analyze now',1,min(20,len(asins)),min(5,len(asins)))
     st.caption('Start small. Product detail history is cached for 24 hours.')
@@ -192,21 +280,36 @@ if asins:
                 used=at_price(current,USED); rank=at_raw(current,SALES); offers=int(at_raw(current,COUNT_USED)) if at_raw(current,COUNT_USED) is not None else None
                 used_hist=keepa_series(csv[USED],100.0) if isinstance(csv,list) and len(csv)>USED else pd.Series(dtype=float)
                 rank_hist=keepa_series(csv[SALES],1.0) if isinstance(csv,list) and len(csv)>SALES else pd.Series(dtype=float)
+                offer_hist=keepa_series(csv[COUNT_USED],1.0) if isinstance(csv,list) and len(csv)>COUNT_USED else pd.Series(dtype=float)
                 floor=intrinsic_floor(used_hist,floor_days,low_band); season=seasonal_model(used_hist); drops90=rank_drop_count(rank_hist,90)
+                shipped_ref=shipped_used_reference(current); strend,offers90,offers_now=supply_trend(offer_hist); recoveries=recovery_cycles(used_hist)
                 x365=used_hist[used_hist.index>=used_hist.index.max()-pd.Timedelta(days=365)] if not used_hist.empty else pd.Series(dtype=float)
                 med=round(float(x365.median()),2) if not x365.empty else None
                 histories[asin]=(used_hist,rank_hist)
-                rows.append({'ASIN':asin,'Title':title,'Book Type':classify_book(title),'Rank':rank,'Current Used ref ($)':used,'Buy Cost SHIPPED ($)':used,'Intrinsic ($)':floor,'365d Median ($)':med,'Rank Drops 90d':drops90,'Used Offers':offers,'Supply Meter':supply_meter(offers,drops90),'Seasonal Value ($)':season['value'] if season else None,'Peak':month_name(season['month']) if season else '','Seasonal Years':season['years'] if season else 0,'Seasonal Confidence':season['confidence'] if season else 'None','Amazon':f'https://www.amazon.com/dp/{asin}','Keepa':f'https://keepa.com/#!product/1-{asin}'})
-            st.session_state['books_v4']=rows; st.session_state['histories_v4']=histories
+                dealmeta=st.session_state.get('deal_meta_v5',{}).get(asin,{})
+                source=dealmeta.get('source','Value Mine')
+                drop_pct=dealmeta.get('drop_pct')
+                crash=price_crash_signal(used,med,floor)
+                rows.append({'ASIN':asin,'Title':title,'Source':source,'Recent Drop %':drop_pct,'Book Type':classify_book(title),'Rank':rank,
+                    'Current Used ref ($)':used,'Buy Cost SHIPPED ($)':shipped_ref if shipped_ref is not None else used,
+                    'Shipped Ref Available':shipped_ref is not None,'Intrinsic ($)':floor,'365d Median ($)':med,
+                    'Rank Drops 90d':drops90,'Used Offers':offers,'Supply Meter':supply_meter(offers,drops90),
+                    'Supply Trend':strend,'Offers ~90d Ago':offers90,'Recovery Cycles':recoveries,'Price Signal':crash,
+                    'Seasonal Value ($)':season['value'] if season else None,'Peak':month_name(season['month']) if season else '',
+                    'Seasonal Years':season['years'] if season else 0,'Seasonal Confidence':season['confidence'] if season else 'None',
+                    'Amazon':f'https://www.amazon.com/dp/{asin}','Keepa':f'https://keepa.com/#!product/1-{asin}'})
+            if mining_mode.startswith('🎓'):
+                rows=sorted(rows,key=lambda x:(0 if x['Seasonal Value ($)'] is not None else 1,-x['Seasonal Years']))
+            st.session_state['books_v5']=rows; st.session_state['histories_v5']=histories
             st.success(f'Analyzed {len(rows)} books. Tokens remaining: {response.get("tokensLeft","unknown")}')
         except Exception as e:st.error(f'Keepa details failed: {e}')
 
-books=st.session_state.get('books_v4',[])
+books=st.session_state.get('books_v5',[])
 if books:
     st.subheader('2 · Verify shipped buy cost')
     df=pd.DataFrame(books)
-    st.caption('IMPORTANT: Current Used is a Keepa market reference. Edit **Buy Cost SHIPPED** to the actual item + shipping you can purchase for.')
-    edited=st.data_editor(df[['ASIN','Title','Buy Cost SHIPPED ($)','Current Used ref ($)','Intrinsic ($)','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Current Used ref ($)','Intrinsic ($)','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter']])
+    st.caption("V5 pre-fills **Buy Cost SHIPPED** from Keepa's shipping-inclusive Used condition/Used Buy Box reference when available; otherwise it falls back to generic Used. Always edit it to the actual item + shipping at checkout.")
+    edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','Current Used ref ($)','Intrinsic ($)','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Intrinsic ($)','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']])
     buy_map=dict(zip(edited['ASIN'],edited['Buy Cost SHIPPED ($)']))
 
     results=[]
@@ -229,7 +332,7 @@ if books:
 
     st.subheader('3 · Quick-glance sourcing board')
     st.caption('⚫ mini graph = generic Used price. 🟢 = sales rank. Supply Meter combines current Used offer count with recent rank-drop activity. It is a heuristic, not a guarantee of unit sales.')
-    histories=st.session_state.get('histories_v4',{})
+    histories=st.session_state.get('histories_v5',{})
     order={'🟢 BUY':0,'🟠 BUY & HOLD':1,'🟡 ANALYZE':2,'🔴 PASS':3}
     results=sorted(results,key=lambda x:(order.get(x['Decision'],9),-(x['Profit @ Intrinsic ($)'] or -999)))
     for r in results:
@@ -240,7 +343,9 @@ if books:
             left,graph,metrics,decision=st.columns([2.2,3.1,3.0,1.8])
             with left:
                 st.markdown(f"**{r['Title'][:110]}**")
-                st.caption(f"ASIN: `{r['ASIN']}` · {r['Book Type']}")
+                st.caption(f"ASIN: `{r['ASIN']}` · {r['Book Type']} · {r['Source']}")
+                if r.get('Price Signal'): st.caption(r['Price Signal'])
+                if r.get('Seasonal Value ($)') is not None: st.caption(f"🎓 Seasonal: ${r['Seasonal Value ($)']:.2f} · peak {r['Peak']} · {r['Seasonal Years']} prior years")
                 st.markdown(f"[Keepa]({r['Keepa']}) · [Amazon]({r['Amazon']})")
             with graph:
                 p,rk=histories.get(r['ASIN'],(pd.Series(dtype=float),pd.Series(dtype=float)))
@@ -255,7 +360,8 @@ if books:
                 d.metric('365 median',f"${r['365d Median ($)']:.2f}" if r['365d Median ($)'] is not None else '—')
                 e.metric('Drops 90d',r['Rank Drops 90d'])
                 f.metric('Used offers',r['Used Offers'] if r['Used Offers'] is not None else '—')
-                st.write(f"**Supply:** {r['Supply Meter']} · **Profit:** ${r['Profit @ Intrinsic ($)']:.2f}" if r['Profit @ Intrinsic ($)'] is not None else f"**Supply:** {r['Supply Meter']}")
+                st.write(f"**Supply:** {r['Supply Meter']} · **Trend:** {r['Supply Trend']} · **Profit:** ${r['Profit @ Intrinsic ($)']:.2f}" if r['Profit @ Intrinsic ($)'] is not None else f"**Supply:** {r['Supply Meter']} · **Trend:** {r['Supply Trend']}")
+                if r.get('Recovery Cycles',0)>0: st.caption(f"Price recovery cycles detected: {r['Recovery Cycles']}")
             with decision:
                 st.markdown(f"### {r['Decision']}")
                 st.caption(r['Reason'])
@@ -272,7 +378,7 @@ if books:
                     save_status(r['ASIN'],'Pass',r['Title'],r['Reason']); st.rerun()
 
     out=pd.DataFrame(results)
-    st.download_button('Download V4 results CSV',out.to_csv(index=False).encode(),'bookfinder_v4_results.csv','text/csv')
+    st.download_button('Download V5 results CSV',out.to_csv(index=False).encode(),'bookfinder_v5_results.csv','text/csv')
 
 st.divider(); st.subheader('Saved ASIN history')
 statuses=load_statuses()
@@ -281,4 +387,4 @@ if statuses:
     st.dataframe(hist,use_container_width=True,hide_index=True)
 else:st.caption('No ASINs marked yet.')
 
-st.info('V4 decisions are screening aids. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees before purchasing. Keepa states product requests provide price history and optional marketplace offer data; offer requests can consume additional tokens. citeturn1search2turn1search5')
+st.info('V5 decisions are screening aids. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V5 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
