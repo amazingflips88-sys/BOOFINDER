@@ -1,20 +1,20 @@
-# Private FBA Book Finder — V2
+# Private Used-Book Finder — V5
 
-V2 changes the sourcing logic from “most popular books” to **A2A price-gap opportunities**.
+V5 adds three sourcing engines:
+- Value Mine
+- Recent Used Drops via Keepa Deals
+- Seasonal Mine
 
-## What V2 adds
-- Product discovery sorted toward cheap Used acquisition references rather than best sales rank.
-- Current Used vs Used-FBA price-gap filtering.
-- **Intrinsic floor**: conservative lower-band average from daily Keepa history, with extreme lows trimmed.
-- **Seasonality detection**: identifies recurring calendar-month price premiums only when at least two prior years support the pattern.
-- Separate decisions: **BUY NOW**, **BUY & HOLD**, **REVIEW**, **PASS**.
-- Profit/ROI at both conservative intrinsic value and recurring seasonal value.
+It keeps V4's intrinsic-value model, rank-drop demand proxy, mini Keepa-style chart, Supply Meter, and Reviewed/Watch/Buy/Pass workflow.
 
-## Important limitations
-Keepa market prices are not guaranteed live, purchasable offers. Verify exact condition, edition/ISBN, seller, checkout price, Amazon selling eligibility, and actual FBA fees before buying. The fee field is still a placeholder until Amazon SP-API fee estimation is integrated.
+V5 additions:
+- Shipping-inclusive Used reference when Keepa provides one
+- Recent Used price-drop discovery
+- Seasonal opportunity surfacing
+- 90-day Used-offer supply trend / supply squeeze
+- Price-crash signal vs 365-day median
+- Historical price-recovery-cycle signal
+- Improved book-type classification
+- Persistent ASIN status remains available through the existing optional Supabase secrets
 
-## Streamlit
-Main file: `bookfinder/app.py` when this folder is uploaded inside the repository as `bookfinder/`.
-
-Secret required:
-`KEEPA_API_KEY = "..."`
+Always verify exact edition, condition, live shipped checkout cost, Amazon restrictions and fees before buying.
