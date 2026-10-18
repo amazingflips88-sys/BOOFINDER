@@ -7,7 +7,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 st.set_page_config(page_title='Book Finder V7.2', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V7.2')
+st.title('📚 Private Used-Book Finder — V7.3')
 with st.expander('🧪 Recovery / retest known ASINs', expanded=False):
     st.caption('Loads specific ASINs without running Product Finder discovery. Keepa may cache recently requested product data, but detail-token use is controlled by Keepa.')
     recovery_text=st.text_input('ASINs, comma-separated', value='')
@@ -682,13 +682,15 @@ def classify_book(p):
 
 def month_name(m):return datetime(2000,m,1).strftime('%b') if m else ''
 
-def mini_chart(price_s,rank_s,days,title):
-    ends=[x.index.max() for x in (price_s,rank_s) if not x.empty]
+def mini_chart(price_s,amazon_s,rank_s,days,title):
+    ends=[x.index.max() for x in (price_s,amazon_s,rank_s) if not x.empty]
     if not ends:return None
-    end=max(ends); start=end-pd.Timedelta(days=days); p=price_s[price_s.index>=start]; r=rank_s[rank_s.index>=start]
+    end=max(ends); start=end-pd.Timedelta(days=days); p=price_s[price_s.index>=start]; a=amazon_s[amazon_s.index>=start]; r=rank_s[rank_s.index>=start]
     fig,ax1=plt.subplots(figsize=(5.2,2.0))
-    if not p.empty:ax1.plot(p.index,p.values,color='black',linewidth=1.35)
-    ax1.set_ylabel('Used $',fontsize=7); ax1.grid(alpha=.18); ax1.tick_params(axis='both',labelsize=7)
+    if not p.empty:ax1.plot(p.index,p.values,color='black',linewidth=1.35,label='Used')
+    if not a.empty:ax1.plot(a.index,a.values,color='#f5a000',linewidth=1.35,label='Amazon')
+    if not p.empty or not a.empty:ax1.legend(loc='upper left',fontsize=6,frameon=False,ncol=2)
+    ax1.set_ylabel('Price $',fontsize=7); ax1.grid(alpha=.18); ax1.tick_params(axis='both',labelsize=7)
     ax2=ax1.twinx()
     if not r.empty:ax2.plot(r.index,r.values,color='green',linewidth=.8,alpha=.8); ax2.invert_yaxis()
     ax2.set_ylabel('Rank',fontsize=7); ax2.tick_params(axis='y',labelsize=7); ax1.set_title(title,fontsize=8,loc='left'); fig.tight_layout()
@@ -814,12 +816,13 @@ if asins:
                 used=at_price(current,USED); amazon_price=at_price(current,AMAZON); new_price=at_price(current,NEW); rank=at_raw(current,SALES); offers=int(at_raw(current,COUNT_USED)) if at_raw(current,COUNT_USED) is not None else None
                 used_hist=keepa_series(csv[USED],100.0) if isinstance(csv,list) and len(csv)>USED else pd.Series(dtype=float)
                 rank_hist=keepa_series(csv[SALES],1.0) if isinstance(csv,list) and len(csv)>SALES else pd.Series(dtype=float)
+                amazon_hist=keepa_series(csv[AMAZON],100.0) if isinstance(csv,list) and len(csv)>AMAZON else pd.Series(dtype=float)
                 offer_hist=keepa_series(csv[COUNT_USED],1.0) if isinstance(csv,list) and len(csv)>COUNT_USED else pd.Series(dtype=float)
                 floor=intrinsic_floor(used_hist,floor_days,low_band); ds=demand_supported_value(used_hist,rank_hist,max(730,floor_days)); season=seasonal_model(used_hist); drops90=rank_drop_count(rank_hist,90)
                 shipped_ref=shipped_used_reference(current); strend,offers90,offers_now=supply_trend(offer_hist); recoveries=recovery_cycles(used_hist)
                 x365=used_hist[used_hist.index>=used_hist.index.max()-pd.Timedelta(days=365)] if not used_hist.empty else pd.Series(dtype=float)
                 med=round(float(x365.median()),2) if not x365.empty else None
-                histories[asin]=(used_hist,rank_hist)
+                histories[asin]=(used_hist,amazon_hist,rank_hist)
                 dealmeta=st.session_state.get('deal_meta_v5',{}).get(asin,{})
                 source=dealmeta.get('source','Value Mine')
                 drop_pct=dealmeta.get('drop_pct')
@@ -959,8 +962,8 @@ if books:
                 if r.get('Seasonal Value ($)') is not None: st.caption(f"🎓 Seasonal: ${r['Seasonal Value ($)']:.2f} · peak {r['Peak']} · {r['Seasonal Years']} prior years")
                 st.markdown(f"[Keepa]({r['Keepa']}) · [Amazon]({r['Amazon']})")
             with graph:
-                p,rk=histories.get(r['ASIN'],(pd.Series(dtype=float),pd.Series(dtype=float)))
-                fig=mini_chart(p,rk,chart_days,f'{chart_days}d Used price + sales rank')
+                p,amz,rk=histories.get(r['ASIN'],(pd.Series(dtype=float),pd.Series(dtype=float),pd.Series(dtype=float)))
+                fig=mini_chart(p,amz,rk,chart_days,f'{chart_days}d Used + Amazon price + sales rank')
                 if fig is not None:st.pyplot(fig,use_container_width=True); plt.close(fig)
             with metrics:
                 a,b,c=st.columns(3)
