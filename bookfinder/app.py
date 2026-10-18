@@ -6,8 +6,8 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V6.4', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V6.4')
+st.set_page_config(page_title='Book Finder V6.5', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V6.5')
 st.caption('A2A sourcing: demand-supported value + weight-based Amazon/FBA fee engine + recent Used drops + seasonal value + demand/supply + review history.')
 
 KEEPA_EPOCH = datetime(2011, 1, 1, tzinfo=timezone.utc)
@@ -54,6 +54,17 @@ def save_status(asin, status, title='', reason=''):
     else:
         st.session_state.setdefault('local_statuses_v5', {})[asin]=row
 
+def persist_analyzed(rows):
+    # Automatic marker is deliberately distinct from the user's Buy/Watch/Pass/Reviewed choices.
+    # A later manual choice simply replaces status='Analyzed' for that ASIN.
+    for row in rows:
+        asin=row.get('ASIN')
+        if not asin: continue
+        existing=load_statuses().get(asin,{})
+        if existing.get('status') in ('Buy','Watch','Pass','Reviewed'):
+            continue
+        save_status(asin,'Analyzed',row.get('Title',''),'Automatically analyzed by scanner; no manual decision yet.')
+
 statuses=load_statuses()
 
 def session_seen_asins():
@@ -78,10 +89,10 @@ with st.sidebar:
     st.divider(); st.header('Discovery quality')
     prefilter_value = st.number_input('Minimum 90-day Used average before detail analysis ($)', 1.0, 500.0, max(25.0, float(min_intrinsic)), 1.0)
     min_value_spread = st.number_input('Target historical value spread over buy cost ($)', 0.0, 100.0, 12.0, 1.0)
-    st.caption('V6.4 prioritizes higher-value candidates before spending product-history tokens. The detailed demand-supported model still makes the final BUY/ANALYZE/PASS decision.')
-    if st.button('Reset analyzed-ASIN memory'):
+    st.caption('V6.5 prioritizes higher-value candidates before spending product-history tokens. Analyzed ASINs are also persisted so app restarts do not make the scanner spend tokens on them again. The detailed demand-supported model still makes the final BUY/ANALYZE/PASS decision.')
+    if st.button('Reset temporary session memory'):
         st.session_state['analyzed_asins_v64']=[]
-        st.success('Analyzed-ASIN memory cleared for this app session.')
+        st.success('Temporary session memory cleared. Persistent analyzed history was not deleted.')
     st.divider(); st.header('Mining mode')
     mining_mode = st.radio('Discovery engine', ['🔎 Value Mine','⚡ Recent Used Drops','🎓 Seasonal Mine'], index=0)
     deal_window = st.selectbox('Recent-drop window', [('24 hours',0),('7 days',1),('31 days',2),('90 days',3)], index=1, format_func=lambda x:x[0])
@@ -474,8 +485,8 @@ def decision_reason(action,buy,floor,maxbuy,drops,offers):
     return 'Needs manual review.'
 
 st.subheader('1 · Mine new Used-book opportunities')
-st.write('Choose **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V6.4 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
-st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V6.4 uses it as the starting shipped-cost estimate; always verify checkout.')
+st.write('Choose **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V6.5 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
+st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V6.5 uses it as the starting shipped-cost estimate; always verify checkout.')
 
 button_label = '⚡ Find recent Used price drops' if mining_mode.startswith('⚡') else ('🎓 Find seasonal candidates' if mining_mode.startswith('🎓') else '🔎 Discover value opportunities')
 if st.button(button_label,disabled=not bool(key),type='primary'):
@@ -512,6 +523,10 @@ if st.button(button_label,disabled=not bool(key),type='primary'):
 
 asins=st.session_state.get('asins_v5',[])
 if asins:
+    st.markdown('#### Free candidate preview')
+    st.caption('Keepa Product Finder returns ASINs at this stage without full product-history detail. Showing the ASINs costs no additional detail-history tokens; titles and demand-supported values appear only after analysis.')
+    preview_n=min(20,len(asins))
+    st.dataframe(pd.DataFrame({'ASIN':asins[:preview_n]}),hide_index=True,use_container_width=True)
     n=st.slider('New books to analyze now',1,min(20,len(asins)),min(5,len(asins)))
     st.caption('Start small. These candidates already passed the cheap discovery prefilter; detailed history now tests whether that value is actually supported by demand. Product detail history is cached for 24 hours.')
     if st.button(f'Analyze first {n} new books'):
@@ -545,6 +560,8 @@ if asins:
                 rows=sorted(rows,key=lambda x:(0 if x['Seasonal Value ($)'] is not None else 1,-x['Seasonal Years']))
             st.session_state['books_v5']=rows; st.session_state['histories_v5']=histories
             remember_analyzed([r.get('ASIN') for r in rows])
+            persist_analyzed(rows)
+            statuses=load_statuses()
             st.success(f'Analyzed {len(rows)} books. Tokens remaining: {response.get("tokensLeft","unknown")}')
         except Exception as e:st.error(f'Keepa details failed: {e}')
 
@@ -552,7 +569,7 @@ books=st.session_state.get('books_v5',[])
 if books:
     st.subheader('2 · Verify shipped buy cost')
     df=pd.DataFrame(books)
-    st.caption("V6.4 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
+    st.caption("V6.5 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
     edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal'] if c in df.columns])
     buy_map=dict(zip(edited['ASIN'],edited['Buy Cost SHIPPED ($)']))
 
@@ -664,13 +681,15 @@ if books:
                     save_status(r['ASIN'],'Pass',r['Title'],f"Scanner: {r['Decision']} — {r['Reason']}"); st.rerun()
 
     out=pd.DataFrame(results)
-    st.download_button('Download V6.4 results CSV',out.to_csv(index=False).encode(),'bookfinder_v6_4_results.csv','text/csv')
+    st.download_button('Download V6.5 results CSV',out.to_csv(index=False).encode(),'bookfinder_v6_5_results.csv','text/csv')
 
 st.divider(); st.subheader('Saved ASIN history')
 statuses=load_statuses()
 if statuses:
     hist=pd.DataFrame(list(statuses.values()))
+    if 'status' in hist.columns:
+        hist['decision_type']=hist['status'].apply(lambda x:'Automatic analyzed marker' if x=='Analyzed' else 'Your decision')
     st.dataframe(hist,use_container_width=True,hide_index=True)
 else:st.caption('No ASINs marked yet.')
 
-st.info('V6.4 decisions are screening aids. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V6.4 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
+st.info('V6.5 decisions are screening aids. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V6.5 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
