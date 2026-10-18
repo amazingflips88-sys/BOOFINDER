@@ -6,9 +6,9 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V6', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V6')
-st.caption('A2A sourcing: demand-supported value + recent Used drops + seasonal value + shipped-cost reference + demand/supply + review history.')
+st.set_page_config(page_title='Book Finder V6.1', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V6.1')
+st.caption('A2A sourcing: demand-supported value + Amazon book fee engine + recent Used drops + seasonal value + demand/supply + review history.')
 
 KEEPA_EPOCH = datetime(2011, 1, 1, tzinfo=timezone.utc)
 
@@ -63,7 +63,7 @@ with st.sidebar:
     min_profit = st.number_input('Minimum estimated profit ($)', 0., 100., 5.)
     min_roi = st.number_input('Minimum ROI (%)', 0, 1000, 50)
     extra_cost = st.number_input('Inbound shipping + prep ($)', 0., 30., 2.)
-    fee_est = st.number_input('Estimated Amazon fees ($) — placeholder', 0., 50., 8.)
+    st.caption('Amazon fees are now calculated per book: 15% referral + $1.80 media closing fee + estimated FBA fulfillment. You can edit the FBA fee per candidate before buying.')
     max_rank = st.number_input('Maximum current sales rank', 1000, 10000000, 2000000, step=100000)
     st.divider(); st.header('Mining mode')
     mining_mode = st.radio('Discovery engine', ['🔎 Value Mine','⚡ Recent Used Drops','🎓 Seasonal Mine'], index=0)
@@ -286,6 +286,45 @@ def mini_chart(price_s,rank_s,days,title):
     ax2.set_ylabel('Rank',fontsize=7); ax2.tick_params(axis='y',labelsize=7); ax1.set_title(title,fontsize=8,loc='left'); fig.tight_layout()
     return fig
 
+def keepa_fba_fulfillment_fee(product):
+    """Best available FBA fulfillment reference from Keepa product metadata.
+
+    Keepa commonly exposes fbaFees.pickAndPackFee in cents. This is a
+    screening estimate; Amazon's Revenue Calculator / Product Fees API is the
+    authority for the exact fee at a given price and date.
+    """
+    f=product.get('fbaFees') or {}
+    for k in ('pickAndPackFee','fulfillmentFee','fee'):
+        v=f.get(k) if isinstance(f,dict) else None
+        if isinstance(v,(int,float)) and v>=0:
+            return round(v/100.0,2)
+    return None
+
+def amazon_book_fees(sell_price, fba_fee):
+    """Amazon Books screening fee model for a Professional FBA seller.
+
+    Books: 15% referral fee + $1.80 media closing fee + FBA fulfillment.
+    The FBA component is editable because exact size/weight, peak rates,
+    surcharges and account-specific economics can change.
+    """
+    if sell_price is None or sell_price<=0 or fba_fee is None:
+        return None
+    referral=round(float(sell_price)*0.15,2)
+    closing=1.80
+    fulfillment=round(float(fba_fee),2)
+    total=round(referral+closing+fulfillment,2)
+    return {'referral':referral,'closing':closing,'fulfillment':fulfillment,'total':total}
+
+def max_buy_with_dynamic_fees(sell_price, fba_fee, extra_cost, min_profit, min_roi, max_cost):
+    fees=amazon_book_fees(sell_price,fba_fee)
+    if not fees:return None
+    net_before_buy= sell_price-fees['total']-extra_cost
+    by_profit=net_before_buy-min_profit
+    # ROI = profit / (buy + inbound/prep). Solve for buy.
+    r=min_roi/100.0
+    by_roi=(net_before_buy-r*extra_cost)/(1+r)
+    return round(max(0,min(max_cost,by_profit,by_roi)),2)
+
 def decision_reason(action,buy,floor,maxbuy,drops,offers):
     if action=='🟢 BUY':return 'Passes conservative value, profit and ROI rules.'
     if action=='🟠 BUY & HOLD':return 'Recurring seasonal value passes your rules.'
@@ -353,7 +392,7 @@ if asins:
                 crash=price_crash_signal(used,med,floor)
                 rows.append({'ASIN':asin,'Title':title,'Source':source,'Recent Drop %':drop_pct,'Book Type':classify_book(title),'Rank':rank,
                     'Current Used ref ($)':used,'Buy Cost SHIPPED ($)':shipped_ref if shipped_ref is not None else used,
-                    'Shipped Ref Available':shipped_ref is not None,'Intrinsic ($)':floor,'Demand-Supported Value ($)':ds['value'] if ds else None,'Demand Events':ds['events'] if ds else 0,'Demand-Supported Median ($)':ds['median'] if ds else None,'Demand Value Reason':supported_value_reason(ds,floor,med),'365d Median ($)':med,
+                    'Shipped Ref Available':shipped_ref is not None,'FBA Fulfillment Fee ($)':keepa_fba_fulfillment_fee(p),'Intrinsic ($)':floor,'Demand-Supported Value ($)':ds['value'] if ds else None,'Demand Events':ds['events'] if ds else 0,'Demand-Supported Median ($)':ds['median'] if ds else None,'Demand Value Reason':supported_value_reason(ds,floor,med),'365d Median ($)':med,
                     'Rank Drops 90d':drops90,'Used Offers':offers,'Supply Meter':supply_meter(offers,drops90),
                     'Supply Trend':strend,'Offers ~90d Ago':offers90,'Recovery Cycles':recoveries,'Price Signal':crash,
                     'Seasonal Value ($)':season['value'] if season else None,'Peak':month_name(season['month']) if season else '',
@@ -369,32 +408,37 @@ books=st.session_state.get('books_v5',[])
 if books:
     st.subheader('2 · Verify shipped buy cost')
     df=pd.DataFrame(books)
-    st.caption("V6 pre-fills **Buy Cost SHIPPED** from Keepa's shipping-inclusive Used condition/Used Buy Box reference when available; otherwise it falls back to generic Used. Always edit it to the actual item + shipping at checkout.")
-    edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']])
+    st.caption("V6.1 pre-fills **Buy Cost SHIPPED** from Keepa when available. **FBA Fulfillment Fee** comes from Keepa product metadata when available; verify/edit it against Amazon's Revenue Calculator before purchasing. Referral (15%) and the $1.80 media closing fee are calculated automatically from the demand-supported sell value.")
+    edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','FBA Fulfillment Fee ($)','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']])
     buy_map=dict(zip(edited['ASIN'],edited['Buy Cost SHIPPED ($)']))
+    fba_map=dict(zip(edited['ASIN'],edited['FBA Fulfillment Fee ($)']))
 
     results=[]
     for b in books:
         buy=buy_map.get(b['ASIN']); floor=b['Intrinsic ($)']; supported=b.get('Demand-Supported Value ($)'); seasonal=b['Seasonal Value ($)']
         valuation=supported if supported is not None else floor
         buy=float(buy) if pd.notna(buy) else None
-        profit=round(valuation-buy-fee_est-extra_cost,2) if buy is not None and valuation is not None else None
+        fba=fba_map.get(b['ASIN'])
+        fba=float(fba) if pd.notna(fba) else None
+        fees=amazon_book_fees(valuation,fba)
+        total_fees=fees['total'] if fees else None
+        profit=round(valuation-buy-total_fees-extra_cost,2) if buy is not None and valuation is not None and total_fees is not None else None
         roi=round(100*profit/(buy+extra_cost),1) if profit is not None and buy+extra_cost>0 else None
-        sprofit=round(seasonal-buy-fee_est-extra_cost,2) if buy is not None and seasonal is not None else None
+        sfees=amazon_book_fees(seasonal,fba)
+        sprofit=round(seasonal-buy-sfees['total']-extra_cost,2) if buy is not None and seasonal is not None and sfees else None
         sroi=round(100*sprofit/(buy+extra_cost),1) if sprofit is not None and buy+extra_cost>0 else None
-        # max buy constrained by both min profit and min ROI
-        max_profit_buy=valuation-fee_est-extra_cost-min_profit if valuation is not None else None
-        max_roi_buy=(valuation-fee_est-extra_cost)/(1+min_roi/100) if valuation is not None else None
-        maxbuy=round(max(0,min(max_cost,max_profit_buy,max_roi_buy)),2) if max_profit_buy is not None else None
-        normal_ok=valuation is not None and valuation>=min_intrinsic and buy is not None and buy<=maxbuy and profit>=min_profit and roi>=min_roi and b['Rank Drops 90d']>=2 and (supported is not None or b['Rank Drops 90d']>=5)
-        seasonal_ok=seasonal is not None and buy is not None and b['Seasonal Years']>=2 and sprofit>=min_profit and sroi>=min_roi
+        maxbuy=max_buy_with_dynamic_fees(valuation,fba,extra_cost,min_profit,min_roi,max_cost) if valuation is not None else None
+        normal_ok=valuation is not None and valuation>=min_intrinsic and buy is not None and maxbuy is not None and profit is not None and roi is not None and buy<=maxbuy and profit>=min_profit and roi>=min_roi and b['Rank Drops 90d']>=2 and (supported is not None or b['Rank Drops 90d']>=5)
+        seasonal_ok=seasonal is not None and buy is not None and sprofit is not None and sroi is not None and b['Seasonal Years']>=2 and sprofit>=min_profit and sroi>=min_roi
         action='🟢 BUY' if normal_ok else ('🟡 ANALYZE' if seasonal_ok else ('🔴 PASS' if valuation is not None and (valuation<min_intrinsic or (maxbuy is not None and buy is not None and buy>maxbuy*1.5)) else '🟡 ANALYZE'))
         reason=decision_reason(action,buy,valuation,maxbuy,b['Rank Drops 90d'],b['Used Offers'])
         if supported is None and action=='🟢 BUY':
             action='🟡 ANALYZE'; reason='Old intrinsic model passes, but demand-supported value is not established yet.'
         elif supported is not None and action!='🟢 BUY' and b.get('Demand Value Reason'):
             reason=b['Demand Value Reason'] if supported < (floor or supported)*.70 else reason
-        results.append({**b,'Buy Cost SHIPPED ($)':buy,'Max Buy ($)':maxbuy,'Profit @ Supported Value ($)':profit,'ROI (%)':roi,'Decision':action,'Reason':reason})
+        if fba is None:
+            action='🟡 ANALYZE'; reason='FBA fulfillment fee unavailable from Keepa. Enter the fee from Amazon Revenue Calculator before buying.'
+        results.append({**b,'Buy Cost SHIPPED ($)':buy,'FBA Fulfillment Fee ($)':fba,'Amazon Referral Fee ($)':fees['referral'] if fees else None,'Media Closing Fee ($)':fees['closing'] if fees else 1.80,'Total Amazon Fees ($)':total_fees,'Max Buy ($)':maxbuy,'Profit @ Supported Value ($)':profit,'ROI (%)':roi,'Decision':action,'Reason':reason})
 
     st.subheader('3 · Quick-glance sourcing board')
     st.caption('⚫ mini graph = generic Used price. 🟢 = sales rank. Supply Meter combines current Used offer count with recent rank-drop activity. It is a heuristic, not a guarantee of unit sales.')
@@ -430,6 +474,10 @@ if books:
                 e.metric('Drops 90d',r['Rank Drops 90d'])
                 f.metric('Used offers',r['Used Offers'] if r['Used Offers'] is not None else '—')
                 st.write(f"**Supply:** {r['Supply Meter']} · **Trend:** {r['Supply Trend']} · **Profit:** ${r['Profit @ Supported Value ($)']:.2f}" if r['Profit @ Supported Value ($)'] is not None else f"**Supply:** {r['Supply Meter']} · **Trend:** {r['Supply Trend']}")
+                if r.get('Total Amazon Fees ($)') is not None:
+                    st.caption(f"Amazon fees est.: ${r['Total Amazon Fees ($)']:.2f} = referral ${r['Amazon Referral Fee ($)']:.2f} + closing $1.80 + FBA ${r['FBA Fulfillment Fee ($)']:.2f}")
+                else:
+                    st.caption('Amazon fees: enter FBA fulfillment fee to calculate profit/max buy.')
                 if r.get('Recovery Cycles',0)>0: st.caption(f"Price recovery cycles detected: {r['Recovery Cycles']}")
             with decision:
                 st.markdown(f"### {r['Decision']}")
@@ -447,7 +495,7 @@ if books:
                     save_status(r['ASIN'],'Pass',r['Title'],f"Scanner: {r['Decision']} — {r['Reason']}"); st.rerun()
 
     out=pd.DataFrame(results)
-    st.download_button('Download V6 results CSV',out.to_csv(index=False).encode(),'bookfinder_v6_results.csv','text/csv')
+    st.download_button('Download V6.1 results CSV',out.to_csv(index=False).encode(),'bookfinder_v6_1_results.csv','text/csv')
 
 st.divider(); st.subheader('Saved ASIN history')
 statuses=load_statuses()
@@ -456,4 +504,4 @@ if statuses:
     st.dataframe(hist,use_container_width=True,hide_index=True)
 else:st.caption('No ASINs marked yet.')
 
-st.info('V6 decisions are screening aids. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V5 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
+st.info('V6.1 decisions are screening aids. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V5 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
