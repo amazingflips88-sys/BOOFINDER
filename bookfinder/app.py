@@ -1,4 +1,4 @@
-import os, json, re
+import os, json, re, math
 from datetime import datetime, timedelta, timezone
 import requests
 import pandas as pd
@@ -6,20 +6,24 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V6.5.2', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V6.5.2')
+st.set_page_config(page_title='Book Finder V6.5.3', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V6.5.3')
 with st.expander('🧪 Recovery / retest known ASINs', expanded=False):
     st.caption('Loads specific ASINs without running Product Finder discovery. Keepa may cache recently requested product data, but detail-token use is controlled by Keepa.')
     recovery_text=st.text_input('ASINs, comma-separated', value='')
     if st.button('Load these ASINs'):
-        vals=[x.strip().upper() for x in recovery_text.replace('\n',',').split(',') if x.strip()]
-        vals=list(dict.fromkeys(vals))[:20]
+        raw_vals=[x.strip().upper() for x in recovery_text.replace('\n',',').split(',') if x.strip()]
+        raw_vals=list(dict.fromkeys(raw_vals))[:20]
+        vals=[a for a in raw_vals if re.fullmatch(r'[A-Z0-9]{10}',a)]
+        invalid=[a for a in raw_vals if a not in vals]
+        if invalid:
+            st.warning('Skipped invalid ASIN format: ' + ', '.join(invalid) + '. ASINs must be exactly 10 letters/numbers.')
         if vals:
             st.session_state['asins_v5']=vals
             st.session_state['deal_meta_v5']={a:{'source':'Recovery/Test'} for a in vals}
-            st.success(f'Loaded {len(vals)} ASIN(s) without a discovery call. Scroll to the analysis button below.')
+            st.success(f'Loaded {len(vals)} valid ASIN(s) without a discovery call. Scroll to the analysis button below.')
         else:
-            st.warning('Enter at least one ASIN.')
+            st.warning('Enter at least one valid 10-character ASIN.')
 
 st.caption('A2A sourcing: demand-supported value + weight-based Amazon/FBA fee engine + recent Used drops + seasonal value + demand/supply + review history.')
 
@@ -512,8 +516,8 @@ def decision_reason(action,buy,floor,maxbuy,drops,offers):
     return 'Needs manual review.'
 
 st.subheader('1 · Mine new Used-book opportunities')
-st.write('Choose **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V6.5.2 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
-st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V6.5.2 uses it as the starting shipped-cost estimate; always verify checkout.')
+st.write('Choose **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V6.5.3 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
+st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V6.5.3 uses it as the starting shipped-cost estimate; always verify checkout.')
 
 button_label = '⚡ Find recent Used price drops' if mining_mode.startswith('⚡') else ('🎓 Find seasonal candidates' if mining_mode.startswith('🎓') else '🔎 Discover value opportunities')
 if st.button(button_label,disabled=not bool(key),type='primary'):
@@ -599,7 +603,7 @@ books=st.session_state.get('books_v5',[])
 if books:
     st.subheader('2 · Verify shipped buy cost')
     df=pd.DataFrame(books)
-    st.caption("V6.5.2 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
+    st.caption("V6.5.3 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
     edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal'] if c in df.columns])
     buy_map=dict(zip(edited['ASIN'],edited['Buy Cost SHIPPED ($)']))
 
@@ -722,4 +726,4 @@ if statuses:
     st.dataframe(hist,use_container_width=True,hide_index=True)
 else:st.caption('No ASINs marked yet.')
 
-st.info('V6.5.2 decisions are screening aids. Analyzed ASINs are persisted immediately after Keepa returns product data. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V6.5.2 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
+st.info('V6.5.3 decisions are screening aids. Analyzed ASINs are persisted immediately after Keepa returns product data. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V6.5.3 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
