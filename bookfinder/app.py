@@ -6,9 +6,9 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V6.2.2', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V6.2.2')
-st.caption('A2A sourcing: demand-supported value + Amazon book fee engine + recent Used drops + seasonal value + demand/supply + review history.')
+st.set_page_config(page_title='Book Finder V6.2', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V6.2')
+st.caption('A2A sourcing: demand-supported value + weight-based Amazon/FBA fee engine + recent Used drops + seasonal value + demand/supply + review history.')
 
 KEEPA_EPOCH = datetime(2011, 1, 1, tzinfo=timezone.utc)
 
@@ -62,8 +62,9 @@ with st.sidebar:
     min_intrinsic = st.number_input('Minimum intrinsic Used value ($)', 1., 500., 20.)
     min_profit = st.number_input('Minimum estimated profit ($)', 0., 100., 5.)
     min_roi = st.number_input('Minimum ROI (%)', 0, 1000, 50)
-    extra_cost = st.number_input('Inbound shipping + prep ($)', 0., 30., 2.)
-    st.caption('Amazon fees are now calculated per book: 15% referral + $1.80 media closing fee + estimated FBA fulfillment. You can edit the FBA fee per candidate before buying.')
+    inbound_per_lb = st.number_input('Inbound placement + ship to FBA ($/lb)', 0.0, 5.0, 0.60, 0.05)
+    prep_cost = st.number_input('Prep cost per book ($)', 0.0, 20.0, 0.00, 0.10)
+    st.caption('Amazon fees are calculated per book: 15% referral + $1.80 media closing + 2026 FBA fulfillment. Inbound placement + shipping to FBA is modeled separately from weight at the $/lb rate above.')
     max_rank = st.number_input('Maximum current sales rank', 1000, 10000000, 2000000, step=100000)
     st.divider(); st.header('Mining mode')
     mining_mode = st.radio('Discovery engine', ['🔎 Value Mine','⚡ Recent Used Drops','🎓 Seasonal Mine'], index=0)
@@ -521,10 +522,9 @@ books=st.session_state.get('books_v5',[])
 if books:
     st.subheader('2 · Verify shipped buy cost')
     df=pd.DataFrame(books)
-    st.caption("V6.1 pre-fills **Buy Cost SHIPPED** from Keepa when available. **FBA Fulfillment Fee** comes from Keepa product metadata when available; verify/edit it against Amazon's Revenue Calculator before purchasing. Referral (15%) and the $1.80 media closing fee are calculated automatically from the demand-supported sell value.")
-    edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','FBA Fulfillment Fee ($)','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']])
+    st.caption("V6.2 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
+    edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal'] if c in df.columns])
     buy_map=dict(zip(edited['ASIN'],edited['Buy Cost SHIPPED ($)']))
-    fba_map=dict(zip(edited['ASIN'],edited['FBA Fulfillment Fee ($)']))
 
     results=[]
     for b in books:
@@ -634,7 +634,7 @@ if books:
                     save_status(r['ASIN'],'Pass',r['Title'],f"Scanner: {r['Decision']} — {r['Reason']}"); st.rerun()
 
     out=pd.DataFrame(results)
-    st.download_button('Download V6.1 results CSV',out.to_csv(index=False).encode(),'bookfinder_v6_1_results.csv','text/csv')
+    st.download_button('Download V6.2 results CSV',out.to_csv(index=False).encode(),'bookfinder_v6_2_results.csv','text/csv')
 
 st.divider(); st.subheader('Saved ASIN history')
 statuses=load_statuses()
@@ -643,4 +643,4 @@ if statuses:
     st.dataframe(hist,use_container_width=True,hide_index=True)
 else:st.caption('No ASINs marked yet.')
 
-st.info('V6.1 decisions are screening aids. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V5 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
+st.info('V6.2 decisions are screening aids. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V5 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
