@@ -6,8 +6,8 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V6.5', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V6.5')
+st.set_page_config(page_title='Book Finder V6.5.1', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V6.5.1')
 st.caption('A2A sourcing: demand-supported value + weight-based Amazon/FBA fee engine + recent Used drops + seasonal value + demand/supply + review history.')
 
 KEEPA_EPOCH = datetime(2011, 1, 1, tzinfo=timezone.utc)
@@ -383,7 +383,8 @@ def _lookup_standard_fee(tier, shipping_lb, sell_price, peak):
         # Above 3 lb through 20 lb: Amazon rate is base + $0.08 per additional 4 oz interval.
         if shipping_lb<=20:
             base=[6.15,6.97,7.23][band] if not peak else [6.69,7.51,7.77][band]
-            intervals=math.ceil(max(0,shipping_lb-3)*4)
+            shipping_lb=float(shipping_lb)
+            intervals=int(math.ceil(float(max(0.0, shipping_lb-3.0)*4.0)))
             return base + 0.08*intervals
     return None
 
@@ -395,6 +396,10 @@ def is_peak_fba_date(d=None):
 def fba_fulfillment_fee(p,sell_price):
     wt=product_weight_lb(p); dims=product_dimensions_in(p)
     tier,ship_wt=fba_size_tier(wt,dims)
+    if sell_price is not None:
+        sell_price=float(sell_price)
+    if ship_wt is not None:
+        ship_wt=float(ship_wt)
     if sell_price is None or ship_wt is None:
         return {'fee':None,'weight_lb':wt,'shipping_weight_lb':ship_wt,'tier':tier,'peak':is_peak_fba_date(),'needs_review':True}
     base=_lookup_standard_fee(tier,ship_wt,float(sell_price),is_peak_fba_date())
@@ -485,8 +490,8 @@ def decision_reason(action,buy,floor,maxbuy,drops,offers):
     return 'Needs manual review.'
 
 st.subheader('1 · Mine new Used-book opportunities')
-st.write('Choose **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V6.5 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
-st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V6.5 uses it as the starting shipped-cost estimate; always verify checkout.')
+st.write('Choose **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V6.5.1 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
+st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V6.5.1 uses it as the starting shipped-cost estimate; always verify checkout.')
 
 button_label = '⚡ Find recent Used price drops' if mining_mode.startswith('⚡') else ('🎓 Find seasonal candidates' if mining_mode.startswith('🎓') else '🔎 Discover value opportunities')
 if st.button(button_label,disabled=not bool(key),type='primary'):
@@ -569,7 +574,7 @@ books=st.session_state.get('books_v5',[])
 if books:
     st.subheader('2 · Verify shipped buy cost')
     df=pd.DataFrame(books)
-    st.caption("V6.5 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
+    st.caption("V6.5.1 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
     edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Used Offers','Supply Meter','Supply Trend','Price Signal'] if c in df.columns])
     buy_map=dict(zip(edited['ASIN'],edited['Buy Cost SHIPPED ($)']))
 
@@ -692,4 +697,4 @@ if statuses:
     st.dataframe(hist,use_container_width=True,hide_index=True)
 else:st.caption('No ASINs marked yet.')
 
-st.info('V6.5 decisions are screening aids. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V6.5 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
+st.info('V6.5.1 decisions are screening aids. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V6.5.1 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
