@@ -6,8 +6,8 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V6.1', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V6.1')
+st.set_page_config(page_title='Book Finder V6.2.2', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V6.2.2')
 st.caption('A2A sourcing: demand-supported value + Amazon book fee engine + recent Used drops + seasonal value + demand/supply + review history.')
 
 KEEPA_EPOCH = datetime(2011, 1, 1, tzinfo=timezone.utc)
@@ -262,6 +262,119 @@ def price_crash_signal(current_used, med365, floor):
     if pct>=30:return f'📉 {pct:.0f}% below median'
     return ''
 
+
+# ---------- V6.2 fee engine ----------
+# 2026 US FBA fulfillment rate card (excluding apparel/dangerous goods).
+# Amazon applies a 3.5% fuel/logistics surcharge to these base fulfillment fees.
+FUEL_SURCHARGE = 0.035
+
+def product_weight_lb(p):
+    """Keepa packageWeight/itemWeight are grams. Prefer package weight for FBA economics."""
+    vals=[]
+    for k in ('packageWeight','itemWeight'):
+        v=p.get(k)
+        if isinstance(v,(int,float)) and v>0:
+            vals.append(float(v)/453.59237)
+    return vals[0] if vals else None
+
+def product_dimensions_in(p):
+    """Keepa package dimensions are millimeters. Returns L,W,H inches when available."""
+    vals=[]
+    for k in ('packageLength','packageWidth','packageHeight'):
+        v=p.get(k)
+        if not isinstance(v,(int,float)) or v<=0:
+            return None
+        vals.append(float(v)/25.4)
+    return tuple(vals)
+
+def dimensional_weight_lb(dims):
+    if not dims:return None
+    l,w,h=dims
+    return (l*w*h)/139.0
+
+def fba_size_tier(weight_lb,dims):
+    """Practical standard-size classifier for books; nonstandard items are flagged for manual review."""
+    if weight_lb is None:
+        return 'UNKNOWN', None
+    if dims:
+        l,w,h=sorted(dims,reverse=True)
+        # Small standard: <=15 x 12 x 0.75 and <=16 oz
+        if l<=15 and w<=12 and h<=0.75 and weight_lb<=1:
+            return 'SMALL_STANDARD', weight_lb
+        # Large standard: <=18 x 14 x 8 and <=20 lb; dimensional weight can apply.
+        if l<=18 and w<=14 and h<=8 and weight_lb<=20:
+            dw=dimensional_weight_lb(dims)
+            return 'LARGE_STANDARD', max(weight_lb,dw or 0)
+        return 'NONSTANDARD', max(weight_lb,dimensional_weight_lb(dims) or 0)
+    # Most books without dimensions are safer treated as large-standard.
+    return 'LARGE_STANDARD', weight_lb
+
+def _price_band(sell_price):
+    if sell_price < 10:return 0
+    if sell_price <= 50:return 1
+    return 2
+
+def _lookup_standard_fee(tier, shipping_lb, sell_price, peak):
+    """Base 2026 fee before 3.5% fuel surcharge. Returns None for nonstandard."""
+    band=_price_band(sell_price)
+    if tier=='SMALL_STANDARD':
+        oz=shipping_lb*16
+        # thresholds and [<$10, $10-$50, >$50]
+        rows=[
+            (2,[2.62,3.51,3.77]),(4,[2.68,3.61,3.87]),(6,[2.76,3.65,3.91]),
+            (8,[2.86,3.74,4.00]),(10,[2.98,3.89,4.15]),(12,[3.03,3.99,4.25]),
+            (14,[3.14,4.13,4.39]),(16,[3.17,4.18,4.44])]
+        # Peak table above. For non-peak, use Amazon 2026 peak deltas conservatively by
+        # subtracting $0.19 for low-price and $0.39 for regular standard-size bands.
+        for lim,fees in rows:
+            if oz<=lim:
+                base=fees[band]
+                if not peak: base-=0.19 if band==0 else 0.39
+                return base
+    if tier=='LARGE_STANDARD':
+        oz=shipping_lb*16
+        peak_rows=[
+            (4,[3.15,3.97,4.23]),(8,[3.39,4.21,4.47]),(12,[3.66,4.48,4.74]),
+            (16,[4.07,4.89,5.15]),(20,[4.52,5.34,5.60]),(24,[4.91,5.73,5.99]),
+            (28,[5.07,5.89,6.15]),(32,[5.33,6.15,6.41]),(36,[5.47,6.29,6.55]),
+            (40,[5.67,6.49,6.75]),(44,[5.84,6.66,6.92]),(48,[6.07,6.89,7.15])]
+        for lim,fees in peak_rows:
+            if oz<=lim:
+                base=fees[band]
+                if not peak: base-=0.39 if band==0 else 0.54
+                return base
+        # Above 3 lb through 20 lb: Amazon rate is base + $0.08 per additional 4 oz interval.
+        if shipping_lb<=20:
+            base=[6.15,6.97,7.23][band] if not peak else [6.69,7.51,7.77][band]
+            intervals=math.ceil(max(0,shipping_lb-3)*4)
+            return base + 0.08*intervals
+    return None
+
+def is_peak_fba_date(d=None):
+    d=d or datetime.now().date()
+    # 2026 holiday peak: Oct 15, 2026 through Jan 14, 2027.
+    return d>=datetime(2026,10,15).date() and d<=datetime(2027,1,14).date()
+
+def fba_fulfillment_fee(p,sell_price):
+    wt=product_weight_lb(p); dims=product_dimensions_in(p)
+    tier,ship_wt=fba_size_tier(wt,dims)
+    if sell_price is None or ship_wt is None:
+        return {'fee':None,'weight_lb':wt,'shipping_weight_lb':ship_wt,'tier':tier,'peak':is_peak_fba_date(),'needs_review':True}
+    base=_lookup_standard_fee(tier,ship_wt,float(sell_price),is_peak_fba_date())
+    fee=round(base*(1+FUEL_SURCHARGE),2) if base is not None else None
+    return {'fee':fee,'weight_lb':wt,'shipping_weight_lb':ship_wt,'tier':tier,'peak':is_peak_fba_date(),'needs_review':fee is None}
+
+def fee_breakdown(p,sell_price,inbound_per_lb,prep_cost):
+    f=fba_fulfillment_fee(p,sell_price)
+    referral=round(float(sell_price)*0.15,2) if sell_price is not None else None
+    closing=1.80 if sell_price is not None else None
+    inbound=round((f['weight_lb'] or 0)*inbound_per_lb,2) if f['weight_lb'] is not None else None
+    amazon=round(referral+closing+f['fee'],2) if referral is not None and f['fee'] is not None else None
+    all_cost=round(amazon+inbound+prep_cost,2) if amazon is not None and inbound is not None else None
+    return {**f,'referral':referral,'closing':closing,'inbound':inbound,'prep':prep_cost,
+            'amazon_fees':amazon,'fees_before_buy':all_cost}
+
+
 def classify_book(title):
     t=(title or '').lower()
     if any(x in t for x in ['textbook','edition','calculus','algebra','anatomy','chemistry','biology','organizational behavior','economics','accounting']):return 'College/Textbook'
@@ -397,7 +510,7 @@ if asins:
                     'Supply Trend':strend,'Offers ~90d Ago':offers90,'Recovery Cycles':recoveries,'Price Signal':crash,
                     'Seasonal Value ($)':season['value'] if season else None,'Peak':month_name(season['month']) if season else '',
                     'Seasonal Years':season['years'] if season else 0,'Seasonal Confidence':season['confidence'] if season else 'None',
-                    'Amazon':f'https://www.amazon.com/dp/{asin}','Keepa':f'https://keepa.com/#!product/1-{asin}'})
+                    'Amazon':f'https://www.amazon.com/dp/{asin}','Keepa':f'https://keepa.com/#!product/1-{asin}','_product':p})
             if mining_mode.startswith('🎓'):
                 rows=sorted(rows,key=lambda x:(0 if x['Seasonal Value ($)'] is not None else 1,-x['Seasonal Years']))
             st.session_state['books_v5']=rows; st.session_state['histories_v5']=histories
@@ -418,27 +531,49 @@ if books:
         buy=buy_map.get(b['ASIN']); floor=b['Intrinsic ($)']; supported=b.get('Demand-Supported Value ($)'); seasonal=b['Seasonal Value ($)']
         valuation=supported if supported is not None else floor
         buy=float(buy) if pd.notna(buy) else None
-        fba=fba_map.get(b['ASIN'])
-        fba=float(fba) if pd.notna(fba) else None
-        fees=amazon_book_fees(valuation,fba)
-        total_fees=fees['total'] if fees else None
-        profit=round(valuation-buy-total_fees-extra_cost,2) if buy is not None and valuation is not None and total_fees is not None else None
-        roi=round(100*profit/(buy+extra_cost),1) if profit is not None and buy+extra_cost>0 else None
-        sfees=amazon_book_fees(seasonal,fba)
-        sprofit=round(seasonal-buy-sfees['total']-extra_cost,2) if buy is not None and seasonal is not None and sfees else None
-        sroi=round(100*sprofit/(buy+extra_cost),1) if sprofit is not None and buy+extra_cost>0 else None
-        maxbuy=max_buy_with_dynamic_fees(valuation,fba,extra_cost,min_profit,min_roi,max_cost) if valuation is not None else None
-        normal_ok=valuation is not None and valuation>=min_intrinsic and buy is not None and maxbuy is not None and profit is not None and roi is not None and buy<=maxbuy and profit>=min_profit and roi>=min_roi and b['Rank Drops 90d']>=2 and (supported is not None or b['Rank Drops 90d']>=5)
-        seasonal_ok=seasonal is not None and buy is not None and sprofit is not None and sroi is not None and b['Seasonal Years']>=2 and sprofit>=min_profit and sroi>=min_roi
+        fb=fee_breakdown(b.get('_product',{}),valuation,inbound_per_lb,prep_cost) if valuation is not None else None
+
+        amazon_fees=fb['amazon_fees'] if fb else None
+        inbound_cost=fb['inbound'] if fb else None
+        total_before_buy=fb['fees_before_buy'] if fb else None
+
+        profit=round(valuation-buy-total_before_buy,2) if buy is not None and valuation is not None and total_before_buy is not None else None
+        roi=round(100*profit/(buy+inbound_cost+prep_cost),1) if profit is not None and (buy+(inbound_cost or 0)+prep_cost)>0 else None
+
+        sfb=fee_breakdown(b.get('_product',{}),seasonal,inbound_per_lb,prep_cost) if seasonal is not None else None
+        sprofit=round(seasonal-buy-sfb['fees_before_buy'],2) if buy is not None and seasonal is not None and sfb and sfb['fees_before_buy'] is not None else None
+        sroi=round(100*sprofit/(buy+(sfb['inbound'] or 0)+prep_cost),1) if sprofit is not None and (buy+(sfb['inbound'] or 0)+prep_cost)>0 else None
+
+        # Max Buy: satisfy both minimum dollar profit and ROI after all non-acquisition costs.
+        if valuation is not None and total_before_buy is not None:
+            net_before_buy=valuation-total_before_buy
+            max_profit_buy=net_before_buy-min_profit
+            # ROI denominator includes acquisition + inbound + prep.
+            max_roi_buy=(net_before_buy-(min_roi/100)*((inbound_cost or 0)+prep_cost))/(1+min_roi/100)
+            maxbuy=round(max(0,min(max_cost,max_profit_buy,max_roi_buy)),2)
+        else:
+            maxbuy=None
+
+        fee_known=fb is not None and fb['fee'] is not None and fb['weight_lb'] is not None
+        normal_ok=fee_known and valuation is not None and valuation>=min_intrinsic and buy is not None and buy<=maxbuy and profit>=min_profit and roi>=min_roi and b['Rank Drops 90d']>=2 and (supported is not None or b['Rank Drops 90d']>=5)
+        seasonal_ok=sfb is not None and sfb['fee'] is not None and seasonal is not None and buy is not None and b['Seasonal Years']>=2 and sprofit>=min_profit and sroi>=min_roi
         action='🟢 BUY' if normal_ok else ('🟡 ANALYZE' if seasonal_ok else ('🔴 PASS' if valuation is not None and (valuation<min_intrinsic or (maxbuy is not None and buy is not None and buy>maxbuy*1.5)) else '🟡 ANALYZE'))
         reason=decision_reason(action,buy,valuation,maxbuy,b['Rank Drops 90d'],b['Used Offers'])
-        if supported is None and action=='🟢 BUY':
+        if not fee_known:
+            action='🟡 ANALYZE' if action!='🔴 PASS' else action
+            reason='FBA fee/weight could not be calculated reliably; verify in RevSeller/Amazon calculator.'
+        elif supported is None and action=='🟢 BUY':
             action='🟡 ANALYZE'; reason='Old intrinsic model passes, but demand-supported value is not established yet.'
         elif supported is not None and action!='🟢 BUY' and b.get('Demand Value Reason'):
             reason=b['Demand Value Reason'] if supported < (floor or supported)*.70 else reason
-        if fba is None:
-            action='🟡 ANALYZE'; reason='FBA fulfillment fee unavailable from Keepa. Enter the fee from Amazon Revenue Calculator before buying.'
-        results.append({**b,'Buy Cost SHIPPED ($)':buy,'FBA Fulfillment Fee ($)':fba,'Amazon Referral Fee ($)':fees['referral'] if fees else None,'Media Closing Fee ($)':fees['closing'] if fees else 1.80,'Total Amazon Fees ($)':total_fees,'Max Buy ($)':maxbuy,'Profit @ Supported Value ($)':profit,'ROI (%)':roi,'Decision':action,'Reason':reason})
+
+        clean={k:v for k,v in b.items() if k!='_product'}
+        results.append({**clean,'Buy Cost SHIPPED ($)':buy,'Weight (lb)':round(fb['weight_lb'],2) if fb and fb['weight_lb'] is not None else None,
+            'FBA Size Tier':fb['tier'] if fb else 'UNKNOWN','FBA Peak?':fb['peak'] if fb else is_peak_fba_date(),
+            'Referral 15% ($)':fb['referral'] if fb else None,'Closing Fee ($)':fb['closing'] if fb else None,
+            'FBA Fulfillment ($)':fb['fee'] if fb else None,'Inbound+Ship to FBA ($)':inbound_cost,'Prep ($)':prep_cost,
+            'Amazon Fees ($)':amazon_fees,'Total Fees Before Buy ($)':total_before_buy,
+            'Max Buy ($)':maxbuy,'Profit @ Supported Value ($)':profit,'ROI (%)':roi,'Decision':action,'Reason':reason})
 
     st.subheader('3 · Quick-glance sourcing board')
     st.caption('⚫ mini graph = generic Used price. 🟢 = sales rank. Supply Meter combines current Used offer count with recent rank-drop activity. It is a heuristic, not a guarantee of unit sales.')
@@ -474,6 +609,10 @@ if books:
                 e.metric('Drops 90d',r['Rank Drops 90d'])
                 f.metric('Used offers',r['Used Offers'] if r['Used Offers'] is not None else '—')
                 st.write(f"**Supply:** {r['Supply Meter']} · **Trend:** {r['Supply Trend']} · **Profit:** ${r['Profit @ Supported Value ($)']:.2f}" if r['Profit @ Supported Value ($)'] is not None else f"**Supply:** {r['Supply Meter']} · **Trend:** {r['Supply Trend']}")
+                if r.get('FBA Fulfillment ($)') is not None:
+                    st.caption(f"Fees: referral ${r['Referral 15% ($)']:.2f} + closing ${r['Closing Fee ($)']:.2f} + FBA ${r['FBA Fulfillment ($)']:.2f} + inbound/ship ${r['Inbound+Ship to FBA ($)']:.2f} + prep ${r['Prep ($)']:.2f} · wt {r['Weight (lb)']:.2f} lb")
+                else:
+                    st.caption('FBA fee unavailable — verify weight/size in RevSeller.')
                 if r.get('Total Amazon Fees ($)') is not None:
                     st.caption(f"Amazon fees est.: ${r['Total Amazon Fees ($)']:.2f} = referral ${r['Amazon Referral Fee ($)']:.2f} + closing $1.80 + FBA ${r['FBA Fulfillment Fee ($)']:.2f}")
                 else:
