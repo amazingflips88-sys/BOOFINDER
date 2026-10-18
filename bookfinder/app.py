@@ -6,8 +6,8 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V6.8', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V6.8')
+st.set_page_config(page_title='Book Finder V6.8.1', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V6.8.1')
 with st.expander('🧪 Recovery / retest known ASINs', expanded=False):
     st.caption('Loads specific ASINs without running Product Finder discovery. Keepa may cache recently requested product data, but detail-token use is controlled by Keepa.')
     recovery_text=st.text_input('ASINs, comma-separated', value='')
@@ -553,11 +553,16 @@ def fee_breakdown(p,sell_price,inbound_per_lb,prep_cost):
 
 def classify_book(p):
     """Heuristic book-type classifier for sourcing/seasonality context."""
-    title = str(p.get("title") or "").lower()
-    brand = str(p.get("brand") or "").lower()
-    manufacturer = str(p.get("manufacturer") or "").lower()
-    publisher = str(p.get("publisher") or "").lower()
-    binding = str(p.get("binding") or "").lower()
+    if isinstance(p, dict):
+        title = str(p.get("title") or "").lower()
+        brand = str(p.get("brand") or "").lower()
+        manufacturer = str(p.get("manufacturer") or "").lower()
+        publisher = str(p.get("publisher") or "").lower()
+        binding = str(p.get("binding") or "").lower()
+    else:
+        # Existing analysis pipeline passes the title directly.
+        title = str(p or "").lower()
+        brand = manufacturer = publisher = binding = ""
     text = " ".join([title, brand, manufacturer, publisher, binding])
 
     college_terms = [
@@ -660,8 +665,8 @@ def decision_reason(action,buy,floor,maxbuy,drops,offers):
     return 'Needs manual review.'
 
 st.subheader('1 · Mine new Used-book opportunities')
-st.write('Choose **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V6.8 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
-st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V6.8 uses it as the starting shipped-cost estimate; always verify checkout.')
+st.write('Choose **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V6.8.1 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
+st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V6.8.1 uses it as the starting shipped-cost estimate; always verify checkout.')
 
 button_label = '⚡ Find recent Used price drops' if mining_mode.startswith('⚡') else ('🎓 Find seasonal candidates' if mining_mode.startswith('🎓') else '🔎 Discover value opportunities')
 if st.button(button_label,disabled=not bool(key),type='primary'):
@@ -756,7 +761,7 @@ books=st.session_state.get('books_v5',[])
 if books:
     st.subheader('2 · Verify shipped buy cost')
     df=pd.DataFrame(books)
-    st.caption("V6.8 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
+    st.caption("V6.8.1 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
     edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Demand Quality','Days Since Last Drop','Used Offers','Supply Meter','Supply Trend','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Demand Quality','Days Since Last Drop','Used Offers','Supply Meter','Supply Trend','Price Signal'] if c in df.columns])
     buy_map=dict(zip(edited['ASIN'],edited['Buy Cost SHIPPED ($)']))
 
@@ -882,7 +887,7 @@ if books:
                     save_status(r['ASIN'],'Pass',r['Title'],f"Scanner: {r['Decision']} — {r['Reason']}"); st.rerun()
 
     out=pd.DataFrame(results)
-    st.download_button('Download V6.8 results CSV',out.to_csv(index=False).encode(),'bookfinder_v6_8_results.csv','text/csv')
+    st.download_button('Download V6.8.1 results CSV',out.to_csv(index=False).encode(),'bookfinder_v6_8_1_results.csv','text/csv')
 
 st.divider(); st.subheader('Saved ASIN history')
 statuses=load_statuses()
@@ -893,4 +898,4 @@ if statuses:
     st.dataframe(hist,use_container_width=True,hide_index=True)
 else:st.caption('No ASINs marked yet.')
 
-st.info('V6.8 decisions are screening aids. Analyzed ASINs are persisted immediately after Keepa returns product data. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V6.8 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
+st.info('V6.8.1 decisions are screening aids. Analyzed ASINs are persisted immediately after Keepa returns product data. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V6.8.1 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
