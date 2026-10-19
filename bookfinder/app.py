@@ -6,8 +6,8 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V7.5', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V7.5')
+st.set_page_config(page_title='Book Finder V7.5.1', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V7.5.1')
 with st.expander('🧪 Recovery / retest known ASINs', expanded=False):
     st.caption('Loads specific ASINs without running Product Finder discovery. Keepa may cache recently requested product data, but detail-token use is controlled by Keepa.')
     recovery_text=st.text_input('ASINs, comma-separated', value='')
@@ -94,7 +94,9 @@ def persist_raw_products(products):
 statuses=load_statuses()
 
 # V7.4.3 migration: these books were detail-analyzed before automatic persistent markers existed.
-LEGACY_ANALYZED_ASINS = {'1538782227','B0G5ZDLMRN','059395601X','B0F74CH248','0063462540'}
+LEGACY_ANALYZED_ASINS = {'1538782227','B0G5ZDLMRN','059395601X','B0F74CH248','0063462540','0593798635','0310169518','0316404098','0063376695','B0091A0C4O'}
+# Known non-book leak observed during testing. Exclude before paid detail analysis.
+KNOWN_NONBOOK_ASINS = {'B0091A0C4O'}
 
 def migrate_legacy_analyzed():
     existing=load_statuses(); saved=0
@@ -862,8 +864,8 @@ def decision_reason(action,buy,floor,maxbuy,drops,offers):
     return 'Needs manual review.'
 
 st.subheader('1 · Mine new Used-book opportunities')
-st.write('Choose **Opportunity Mine**, **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V7.4.3 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
-st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V7.4.3 uses it as the starting shipped-cost estimate; always verify checkout.')
+st.write('Choose **Opportunity Mine**, **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V7.5.1 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
+st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V7.5.1 uses it as the starting shipped-cost estimate; always verify checkout.')
 
 button_label = ('🚀 Find best opportunities' if mining_mode.startswith('🚀') else ('⚡ Find recent Used price drops' if mining_mode.startswith('⚡') else ('🎓 Find seasonal candidates' if mining_mode.startswith('🎓') else '🔎 Discover value opportunities')))
 if st.button(button_label,disabled=not bool(key),type='primary'):
@@ -907,7 +909,7 @@ if st.button(button_label,disabled=not bool(key),type='primary'):
         legacy={norm(a) for a in LEGACY_ANALYZED_ASINS if norm(a)}
         skip=known | seen | board_seen | prior_selected | legacy
         raw=[norm(a) for a in raw if norm(a)]
-        new=[a for a in raw if a not in skip]
+        new=[a for a in raw if a not in skip and a not in KNOWN_NONBOOK_ASINS]
         st.session_state['asins_v5_raw']=raw; st.session_state['asins_v5']=new
         marked_n=len(set(raw)&known)
         analyzed_n=len(set(raw)&((seen|board_seen|prior_selected|legacy)-known))
