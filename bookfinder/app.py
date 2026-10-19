@@ -51,19 +51,32 @@ def db_headers():
 
 def db_enabled(): return bool(supa_url and supa_key)
 
-@st.cache_data(ttl=30, show_spinner=False)
+def norm_asin(a):
+    return str(a).strip().upper() if a else ''
+
+@st.cache_data(ttl=15, show_spinner=False)
 def load_statuses_remote(url, api_key):
-    r=requests.get(f'{url}/rest/v1/book_status?select=*', headers={'apikey':api_key,'Authorization':f'Bearer {api_key}'}, timeout=20)
-    r.raise_for_status(); return r.json()
+    # Read ALL saved ASINs. Page the table so a PostgREST row cap cannot hide older history.
+    rows=[]; offset=0; page_size=1000
+    headers={'apikey':api_key,'Authorization':f'Bearer {api_key}'}
+    while True:
+        r=requests.get(f'{url}/rest/v1/book_status', headers=headers,
+                       params={'select':'*','limit':page_size,'offset':offset}, timeout=20)
+        r.raise_for_status(); batch=r.json() or []; rows.extend(batch)
+        if len(batch) < page_size: break
+        offset += page_size
+    return rows
 
 def load_statuses():
     if db_enabled():
-        try: return {x['asin']:x for x in load_statuses_remote(supa_url,supa_key)}
+        try: return {norm_asin(x.get('asin')):x for x in load_statuses_remote(supa_url,supa_key) if norm_asin(x.get('asin'))}
         except Exception as e:
             st.sidebar.warning(f'History database unavailable: {e}')
-    return st.session_state.setdefault('local_statuses_v5', {})
+    return {norm_asin(k):v for k,v in st.session_state.setdefault('local_statuses_v5', {}).items() if norm_asin(k)}
 
 def save_status(asin, status, title='', reason=''):
+    asin=norm_asin(asin)
+    if not asin: return
     row={'asin':asin,'status':status,'title':title[:500],'reason':reason[:500],'updated_at':datetime.now(timezone.utc).isoformat()}
     if db_enabled():
         r=requests.post(f'{supa_url}/rest/v1/book_status?on_conflict=asin', headers={**db_headers(),'Prefer':'resolution=merge-duplicates,return=minimal'}, data=json.dumps(row), timeout=20)
@@ -71,11 +84,34 @@ def save_status(asin, status, title='', reason=''):
     else:
         st.session_state.setdefault('local_statuses_v5', {})[asin]=row
 
+def save_analyzed_batch(products):
+    # Durable bulk ledger: every product Keepa successfully returned is persisted once.
+    current=load_statuses(); rows=[]
+    for p in products or []:
+        asin=norm_asin(p.get('asin'))
+        if not asin: continue
+        if current.get(asin,{}).get('status') in ('Buy','Watch','Pass','Reviewed'): continue
+        rows.append({'asin':asin,'status':'Analyzed','title':str(p.get('title') or '')[:500],
+                     'reason':'Keepa product data retrieved; automatic analyzed marker.',
+                     'updated_at':datetime.now(timezone.utc).isoformat()})
+    if not rows: return 0
+    if db_enabled():
+        r=requests.post(f'{supa_url}/rest/v1/book_status?on_conflict=asin',
+            headers={**db_headers(),'Prefer':'resolution=merge-duplicates,return=minimal'},
+            data=json.dumps(rows),timeout=30)
+        r.raise_for_status(); load_statuses_remote.clear()
+        saved=load_statuses(); missing=[x['asin'] for x in rows if x['asin'] not in saved]
+        if missing: raise RuntimeError('History save verification failed for: '+', '.join(missing[:10]))
+    else:
+        local=st.session_state.setdefault('local_statuses_v5', {})
+        for row in rows: local[row['asin']]=row
+    return len(rows)
+
 def persist_analyzed(rows):
     # Automatic marker is deliberately distinct from the user's Buy/Watch/Pass/Reviewed choices.
     # A later manual choice simply replaces status='Analyzed' for that ASIN.
     for row in rows:
-        asin=row.get('ASIN')
+        asin=norm_asin(row.get('ASIN'))
         if not asin: continue
         existing=load_statuses().get(asin,{})
         if existing.get('status') in ('Buy','Watch','Pass','Reviewed'):
@@ -85,7 +121,7 @@ def persist_analyzed(rows):
 def persist_raw_products(products):
     current=load_statuses()
     for p in products or []:
-        asin=p.get('asin')
+        asin=norm_asin(p.get('asin'))
         if not asin: continue
         if current.get(asin,{}).get('status') in ('Buy','Watch','Pass','Reviewed'):
             continue
@@ -885,7 +921,7 @@ def decision_reason(action,buy,floor,maxbuy,drops,offers):
     return 'Needs manual review.'
 
 st.subheader('1 · Mine new Used-book opportunities')
-st.write('Choose **Opportunity Mine**, **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V7.7 uses immediate-profit discovery before detailed analysis, and previously marked ASINs are removed.')
+st.write('Choose **Opportunity Mine**, **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V7.7.2 uses immediate-profit discovery before detailed analysis, and previously marked ASINs are removed.')
 st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V7.7 uses it as the starting shipped-cost estimate; always verify checkout.')
 
 button_label = ('🚀 Find best opportunities' if mining_mode.startswith('🚀') else ('⚡ Find recent Used price drops' if mining_mode.startswith('⚡') else ('🎓 Find seasonal candidates' if mining_mode.startswith('🎓') else '🔎 Discover value opportunities')))
@@ -921,7 +957,7 @@ if st.button(button_label,disabled=not bool(key),type='primary'):
             st.session_state['deal_meta_v5']={a:{'source':'Seasonal Mine' if mining_mode.startswith('🎓') else 'Value Mine'} for a in raw}
         # V7.5: build the skip set FIRST, from fresh persistent history plus every
         # in-session source that can prove an ASIN has already consumed detail tokens.
-        norm=lambda a: str(a).strip().upper() if a else ''
+        norm=norm_asin
         fresh_statuses=load_statuses()
         known={norm(a) for a in fresh_statuses.keys() if norm(a)}
         seen={norm(a) for a in session_seen_asins() if norm(a)}
@@ -954,7 +990,7 @@ if asins:
     else:
         st.dataframe(pd.DataFrame({'ASIN':asins[:preview_n]}),hide_index=True,use_container_width=True)
     n=st.slider('New books to analyze now',1,min(20,len(asins)),min(5,len(asins)))
-    st.caption('V7.7 ranks Opportunity Mine for immediate A2A economics first: cheap current Used cost must have enough historical/New resale headroom to plausibly clear FBA fees, $5 profit and 50% ROI. Detailed history still makes the final decision; attractive recurring seasonal books are kept in a separate SEASONAL WATCH lane.')
+    st.caption('V7.7.2 ranks Opportunity Mine for immediate A2A economics first: cheap current Used cost must have enough historical/New resale headroom to plausibly clear FBA fees, $5 profit and 50% ROI. Detailed history still makes the final decision; attractive recurring seasonal books are kept in a separate SEASONAL WATCH lane.')
     if st.button(f'Analyze first {n} new books'):
         try:
             selected_detail_asins=[str(a).strip().upper() for a in asins[:n]]
@@ -964,13 +1000,13 @@ if asins:
             remember_analyzed(selected_detail_asins)
             with st.spinner('Analyzing Used history, rank drops and supply…'):response=details(key,selected_detail_asins)
             raw_products=response.get('products',[])
-            persist_raw_products(raw_products)
+            saved_history_n=save_analyzed_batch(raw_products)
             remember_analyzed([p.get('asin') for p in raw_products])
             statuses=load_statuses()
             rows=[]; histories={}
             nonbooks=[]
             for p in response.get('products',[]):
-                asin=p.get('asin'); title=p.get('title','')
+                asin=norm_asin(p.get('asin')); title=p.get('title','')
                 if not is_book_product(p):
                     nonbooks.append((asin,title))
                     continue
@@ -1016,7 +1052,9 @@ if asins:
             st.session_state['asins_v5']=asins[n:]
             statuses=load_statuses()
             remaining=len(st.session_state['asins_v5'])
+            durable_total=len(load_statuses())
             st.success(f'Analyzed {len(rows)} books. {remaining} NEW lead(s) remain in this loaded pool. Tokens remaining: {response.get("tokensLeft","unknown")}')
+            st.caption(f'History check: {saved_history_n} returned ASIN(s) saved/confirmed this batch · {durable_total} total ASIN(s) in persistent history.')
             if nonbooks:
                 st.warning('Filtered non-book media from the board: ' + ', '.join(f'{a} {t[:45]}' for a,t in nonbooks))
         except Exception as e:st.error(f'Keepa details failed: {e}')
@@ -1025,7 +1063,7 @@ books=st.session_state.get('books_v5',[])
 if books:
     st.subheader('2 · Verify shipped buy cost')
     df=pd.DataFrame(books)
-    st.caption("V7.7 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
+    st.caption("V7.7.2 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
     edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','Current Used ref ($)','Amazon Price ($)','New Price ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Demand Quality','Days Since Last Drop','Used Offers','Supply Meter','Supply Trend','Supply Momentum','Supply Δ30d %','Supply Δ90d %','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Amazon Price ($)','New Price ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Demand Quality','Days Since Last Drop','Used Offers','Supply Meter','Supply Trend','Supply Momentum','Supply Δ30d %','Supply Δ90d %','Price Signal'] if c in df.columns])
     buy_map=dict(zip(edited['ASIN'],edited['Buy Cost SHIPPED ($)']))
 
@@ -1197,7 +1235,7 @@ if books:
                     save_status(r['ASIN'],'Pass',r['Title'],f"Scanner: {r['Decision']} — {r['Reason']}"); st.rerun()
 
     out=pd.DataFrame(results)
-    st.download_button('Download V7.7 results CSV',out.to_csv(index=False).encode(),'bookfinder_v7_7_results.csv','text/csv')
+    st.download_button('Download V7.7.2 results CSV',out.to_csv(index=False).encode(),'bookfinder_v7_7_2_results.csv','text/csv')
 
 st.divider(); st.subheader('Saved ASIN history')
 statuses=load_statuses()
@@ -1208,4 +1246,4 @@ if statuses:
     st.dataframe(hist,use_container_width=True,hide_index=True)
 else:st.caption('No ASINs marked yet.')
 
-st.info('V7.7 decisions are screening aids. Analyzed ASINs are persisted immediately after Keepa returns product data. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V7.7 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
+st.info('V7.7.2 decisions are screening aids. Analyzed ASINs are persisted immediately after Keepa returns product data. Demand-supported value uses rank drops as a demand proxy, not confirmed sales. Verify exact edition, condition, shipped checkout cost, restrictions and Amazon fees in Amazon Revenue Calculator before purchasing. Recent Drops uses Keepa Deals; Value/Seasonal analysis uses product history. V7.7 avoids requesting full marketplace offers on every book because those calls cost additional tokens.')
