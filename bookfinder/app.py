@@ -6,8 +6,8 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V7.5.1', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V7.5.1')
+st.set_page_config(page_title='Book Finder V7.6', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V7.6')
 with st.expander('🧪 Recovery / retest known ASINs', expanded=False):
     st.caption('Loads specific ASINs without running Product Finder discovery. Keepa may cache recently requested product data, but detail-token use is controlled by Keepa.')
     recovery_text=st.text_input('ASINs, comma-separated', value='')
@@ -176,60 +176,79 @@ def discover(api_key,max_rank,max_cost,min_hist_value,min_spread=12.0):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def discover_ranked(api_key,max_rank,max_cost,min_hist_value,min_spread=12.0):
+    """V7.6 Profit-First Opportunity Mine.
+
+    Product Finder cannot calculate our exact FBA max-buy formula, but it can cheaply
+    search current Used/New/rank fields.  We therefore build several margin bands so
+    books with meaningful current New-vs-Used room rise ahead of books whose Used price
+    is already sitting near New.  Detailed history remains authoritative.
+    """
     hist_floor=max(float(min_hist_value), float(min_spread))
-    base={'rootCategory':[283155],'productType':0,'current_SALES_lte':int(max_rank),'current_USED_lte':int(max_cost*100),'avg90_USED_gte':int(hist_floor*100),'perPage':50,'page':0}
-    def run(sort_field,direction):
-        selection=dict(base); selection['sort']=[[sort_field,direction]]
-        r=requests.get('https://api.keepa.com/query',params={'key':api_key,'domain':1,'selection':json.dumps(selection,separators=(',',':'))},timeout=45)
+    common={'rootCategory':[283155],'productType':0,
+            'current_SALES_lte':int(max_rank),
+            'avg90_USED_gte':int(hist_floor*100),
+            'perPage':50,'page':0}
+
+    def run(selection, sort_field='current_SALES', direction='asc'):
+        q=dict(common); q.update(selection); q['sort']=[[sort_field,direction]]
+        r=requests.get('https://api.keepa.com/query',params={'key':api_key,'domain':1,'selection':json.dumps(q,separators=(',',':'))},timeout=45)
         r.raise_for_status(); data=r.json()
         if data.get('error'): raise ValueError(str(data['error']))
         return data
-    # V7.5: demand-first opportunity ranking.  The previous V7.0 ranking let
-    # extreme historical asking-price gaps dominate the list.  We now add a
-    # current-sales-rank pass and deliberately cap the influence of historical
-    # value and cheap price.  Seasonal Mine remains the separate path for slow
-    # books with repeatable seasonal demand.
-    demand_pass=run('current_SALES','asc')
-    value_pass=run('avg90_USED','desc')
-    price_pass=run('current_USED','asc')
-    demand_list=[a for a in demand_pass.get('asinList',[]) if isinstance(a,str)]
-    value_list=[a for a in value_pass.get('asinList',[]) if isinstance(a,str)]
-    price_list=[a for a in price_pass.get('asinList',[]) if isinstance(a,str)]
 
-    scores={}; lanes={}; positions={}
-    passes=[('Demand',demand_list,2.40),('Deep Value',value_list,0.55),('Fast Flip',price_list,0.45)]
+    # Approximate a profitable spread before detail tokens.  Each band demands more
+    # New-price headroom as acquisition cost rises.  The lowest applicable max-cost is
+    # used so a user's tighter sidebar rule is always respected.
+    bands=[
+        ('Wide Spread', min(float(max_cost),8.0), 22.0, 3.20),
+        ('Profit Spread', min(float(max_cost),12.0), 28.0, 2.70),
+        ('Profit Spread', min(float(max_cost),16.0), 35.0, 2.20),
+        ('High Value Spread', min(float(max_cost),20.0), 42.0, 1.80),
+    ]
+    responses=[]; passes=[]
+    for lane,used_cap,new_floor,weight in bands:
+        if used_cap < 1: continue
+        data=run({'current_USED_lte':int(used_cap*100),'current_NEW_gte':int(new_floor*100)})
+        arr=[a for a in data.get('asinList',[]) if isinstance(a,str)]
+        responses.append(data); passes.append((lane,arr,weight))
+
+    # A demand fallback keeps excellent cheap books from disappearing merely because
+    # Keepa has no current New price.  It is intentionally much lower weight.
+    demand=run({'current_USED_lte':int(float(max_cost)*100)},'current_SALES','asc')
+    cheap=run({'current_USED_lte':int(min(float(max_cost),10.0)*100)},'current_USED','asc')
+    responses.extend([demand,cheap])
+    passes.extend([
+        ('Demand Fallback',[a for a in demand.get('asinList',[]) if isinstance(a,str)],0.65),
+        ('Cheap Entry',[a for a in cheap.get('asinList',[]) if isinstance(a,str)],0.80),
+    ])
+
+    scores={}; lanes={}
     for lane,arr,weight in passes:
         for i,asin in enumerate(arr):
-            # Reciprocal-rank fusion: demand has >4x the weight of either
-            # historical-price signal, preventing a $560/$1,288 median from
-            # winning merely because today's Used price is cheap.
-            scores[asin]=scores.get(asin,0.0)+weight/(12.0+i)
+            scores[asin]=scores.get(asin,0.0)+weight/(10.0+i)
             lanes.setdefault(asin,set()).add(lane)
-            positions.setdefault(asin,{})[lane]=i+1
 
-    # Cross-signal confirmation is useful, but small enough that demand still
-    # controls the ranking.  Books seen only by the historical-value pass get
-    # a penalty; these were the main V7.0 false positives.
+    # Multiple profit bands + demand confirmation are much more useful than a single
+    # historical-price spike.  Pure fallback candidates are deliberately demoted.
     for asin in list(scores):
         ls=lanes.get(asin,set())
-        if 'Demand' in ls and ('Deep Value' in ls or 'Fast Flip' in ls): scores[asin]+=0.025
-        if 'Deep Value' in ls and 'Fast Flip' in ls: scores[asin]+=0.012
-        if ls=={'Deep Value'}: scores[asin]*=0.30
-        elif ls=={'Fast Flip'}: scores[asin]*=0.55
+        profit_lanes={x for x in ls if x in ('Wide Spread','Profit Spread','High Value Spread')}
+        if profit_lanes and 'Demand Fallback' in ls: scores[asin]+=0.040
+        if len(profit_lanes)>=2: scores[asin]+=0.025
+        if not profit_lanes: scores[asin]*=0.22
 
     ranked=sorted(scores,key=lambda a:scores[a],reverse=True)
     meta={}
     for asin in ranked:
         ls=lanes.get(asin,set())
-        if 'Demand' in ls and 'Deep Value' in ls and 'Fast Flip' in ls: lane='Balanced'
-        elif 'Demand' in ls and 'Fast Flip' in ls: lane='Fast Flip'
-        elif 'Demand' in ls and 'Deep Value' in ls: lane='Demand + Value'
-        elif 'Demand' in ls: lane='Demand First'
-        elif 'Deep Value' in ls and 'Fast Flip' in ls: lane='Speculative Value'
-        elif 'Deep Value' in ls: lane='Low-Confidence Value'
-        else: lane='Low-Confidence Price'
+        if 'Wide Spread' in ls: lane='Profit First — Wide Spread'
+        elif 'Profit Spread' in ls: lane='Profit First — Strong Spread'
+        elif 'High Value Spread' in ls: lane='Profit First — High Value'
+        elif 'Cheap Entry' in ls: lane='Cheap Entry Fallback'
+        else: lane='Demand Fallback'
         meta[asin]={'source':'Opportunity Mine','lane':lane,'discovery_score':round(scores[asin]*100,2)}
-    return {'asinList':ranked,'meta':meta,'tokensLeft':min(demand_pass.get('tokensLeft',10**9),value_pass.get('tokensLeft',10**9),price_pass.get('tokensLeft',10**9))}
+    tokens=[x.get('tokensLeft') for x in responses if isinstance(x.get('tokensLeft'),(int,float))]
+    return {'asinList':ranked,'meta':meta,'tokensLeft':min(tokens) if tokens else 'unknown'}
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def discover_deals(api_key, max_rank, max_cost, drop_pct, date_range):
@@ -864,8 +883,8 @@ def decision_reason(action,buy,floor,maxbuy,drops,offers):
     return 'Needs manual review.'
 
 st.subheader('1 · Mine new Used-book opportunities')
-st.write('Choose **Opportunity Mine**, **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V7.5.1 applies a stronger historical-value prefilter before detailed analysis, and previously marked ASINs are removed.')
-st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V7.5.1 uses it as the starting shipped-cost estimate; always verify checkout.')
+st.write('Choose **Opportunity Mine**, **Value Mine**, **Recent Used Drops**, or **Seasonal Mine**. V7.6 uses profit-first discovery before detailed analysis, and previously marked ASINs are removed.')
+st.caption('V6 keeps generic USED history visible, but BUY economics use demand-supported value when enough rank-drop evidence exists. When Keepa exposes a shipping-inclusive Used condition/Used Buy Box reference, V7.6 uses it as the starting shipped-cost estimate; always verify checkout.')
 
 button_label = ('🚀 Find best opportunities' if mining_mode.startswith('🚀') else ('⚡ Find recent Used price drops' if mining_mode.startswith('⚡') else ('🎓 Find seasonal candidates' if mining_mode.startswith('🎓') else '🔎 Discover value opportunities')))
 if st.button(button_label,disabled=not bool(key),type='primary'):
@@ -933,7 +952,7 @@ if asins:
     else:
         st.dataframe(pd.DataFrame({'ASIN':asins[:preview_n]}),hide_index=True,use_container_width=True)
     n=st.slider('New books to analyze now',1,min(20,len(asins)),min(5,len(asins)))
-    st.caption('V7.5 ranks Opportunity Mine demand-first: current sales rank carries much more weight than dramatic historical-price gaps. Seasonal Mine remains the path for slower recurring seasonal books. Detailed history still makes the final decision.')
+    st.caption('V7.6 ranks Opportunity Mine profit-first: strong demand still matters, but candidates with a larger current New-vs-Used spread get priority before detailed analysis. Detailed history still makes the final BUY/ANALYZE/PASS decision.')
     if st.button(f'Analyze first {n} new books'):
         try:
             selected_detail_asins=[str(a).strip().upper() for a in asins[:n]]
@@ -1000,7 +1019,7 @@ books=st.session_state.get('books_v5',[])
 if books:
     st.subheader('2 · Verify shipped buy cost')
     df=pd.DataFrame(books)
-    st.caption("V7.5 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
+    st.caption("V7.6 pre-fills **Buy Cost SHIPPED** from Keepa when available. FBA fulfillment is calculated from the book's weight/dimensions and the 2026 rate model; verify borderline buys against RevSeller/Amazon Revenue Calculator.")
     edited=st.data_editor(df[['ASIN','Title','Source','Buy Cost SHIPPED ($)','Current Used ref ($)','Amazon Price ($)','New Price ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Demand Quality','Days Since Last Drop','Used Offers','Supply Meter','Supply Trend','Supply Momentum','Supply Δ30d %','Supply Δ90d %','Price Signal']],hide_index=True,use_container_width=True,disabled=[c for c in ['ASIN','Title','Source','Current Used ref ($)','Amazon Price ($)','New Price ($)','Intrinsic ($)','Demand-Supported Value ($)','Demand Events','365d Median ($)','Rank Drops 90d','Demand Quality','Days Since Last Drop','Used Offers','Supply Meter','Supply Trend','Supply Momentum','Supply Δ30d %','Supply Δ90d %','Price Signal'] if c in df.columns])
     buy_map=dict(zip(edited['ASIN'],edited['Buy Cost SHIPPED ($)']))
 
@@ -1141,7 +1160,7 @@ if books:
                     wait='—' if r.get('Months to Peak') is None else ('now' if r['Months to Peak']==0 else f"{r['Months to Peak']} mo")
                     st.caption(f"**Seasonal Max Buy: {smx}** · seasonal profit {spr} · ROI {sroi_txt} · next peak {wait}")
                     st.caption(r.get('Seasonal Evidence',''))
-                st.write(f"**Supply:** {r['Supply Meter']} · **Trend:** {r['Supply Trend']} · **Profit:** ${r['Profit @ Supported Value ($)']:.2f}" if r['Profit @ Supported Value ($)'] is not None else f"**Supply:** {r['Supply Meter']} · **Trend:** {r['Supply Trend']}")
+                st.write(f"**Supply:** {r['Supply Meter']} · **Profit:** ${r['Profit @ Supported Value ($)']:.2f}" if r['Profit @ Supported Value ($)'] is not None else f"**Supply:** {r['Supply Meter']}")
                 if r.get('FBA Fulfillment ($)') is not None:
                     st.caption(f"Fees: referral ${r['Referral 15% ($)']:.2f} + closing ${r['Closing Fee ($)']:.2f} + FBA ${r['FBA Fulfillment ($)']:.2f} + inbound/ship ${r['Inbound+Ship to FBA ($)']:.2f} + prep ${r['Prep ($)']:.2f} · wt {r['Weight (lb)']:.2f} lb")
                 else:
