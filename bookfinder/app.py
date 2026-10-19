@@ -6,8 +6,8 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title='Book Finder V7.7', page_icon='📚', layout='wide')
-st.title('📚 Private Used-Book Finder — V7.7')
+st.set_page_config(page_title='Book Finder V7.7.1', page_icon='📚', layout='wide')
+st.title('📚 Private Used-Book Finder — V7.7.1')
 with st.expander('🧪 Recovery / retest known ASINs', expanded=False):
     st.caption('Loads specific ASINs without running Product Finder discovery. Keepa may cache recently requested product data, but detail-token use is controlled by Keepa.')
     recovery_text=st.text_input('ASINs, comma-separated', value='')
@@ -941,8 +941,8 @@ if st.button(button_label,disabled=not bool(key),type='primary'):
 asins=st.session_state.get('asins_v5',[])
 if asins:
     st.markdown('#### Free candidate preview')
-    st.caption('Keepa Product Finder returns ASINs at this stage without full product-history detail. Showing the ASINs costs no additional detail-history tokens; titles and demand-supported values appear only after analysis.')
-    preview_n=min(30,len(asins))
+    st.caption(f'Keepa Product Finder returns ASINs at this stage without full product-history detail. Showing up to 50 leads costs no additional detail-history tokens. {len(asins)} NEW lead(s) remain in this loaded pool; analyze them in batches without running discovery again.')
+    preview_n=min(50,len(asins))
     if mining_mode.startswith('🚀'):
         dm=st.session_state.get('deal_meta_v5',{})
         preview_rows=[]
@@ -1011,8 +1011,12 @@ if asins:
                 rows=sorted(rows,key=lambda x:(0 if x['Seasonal Value ($)'] is not None else 1,-x['Seasonal Years']))
             st.session_state['books_v5']=rows; st.session_state['histories_v5']=histories
             remember_analyzed([r.get('ASIN') for r in rows])
+            # V7.7.1: consume this batch from the already-loaded discovery queue.
+            # This lets the user review the next batch without another Product Finder call.
+            st.session_state['asins_v5']=asins[n:]
             statuses=load_statuses()
-            st.success(f'Analyzed {len(rows)} books. Tokens remaining: {response.get("tokensLeft","unknown")}')
+            remaining=len(st.session_state['asins_v5'])
+            st.success(f'Analyzed {len(rows)} books. {remaining} NEW lead(s) remain in this loaded pool. Tokens remaining: {response.get("tokensLeft","unknown")}')
             if nonbooks:
                 st.warning('Filtered non-book media from the board: ' + ', '.join(f'{a} {t[:45]}' for a,t in nonbooks))
         except Exception as e:st.error(f'Keepa details failed: {e}')
